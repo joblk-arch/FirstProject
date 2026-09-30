@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Private operations dashboard for local AI agents and models.">
+  <title>Local AI Operations</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%2308121c'/%3E%3Cpath d='M16 43V29l16-10 16 10v14L32 53z' fill='none' stroke='%235eead4' stroke-width='5'/%3E%3Ccircle cx='32' cy='34' r='5' fill='%23fbbf24'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span><div><strong>Local AI</strong><span>Operations</span></div></div>
+    <div class="live"><span class="pulse"></span><span id="updated">Connecting…</span></div>
+  </header>
+  <main>
+    <section class="overview" aria-labelledby="overview-title">
+      <div><p class="eyebrow">SYSTEM OVERVIEW</p><h1 id="overview-title">Agent command center</h1></div>
+      <button id="refresh" type="button">Refresh data</button>
+    </section>
+    <section class="metrics" id="metrics" aria-label="Key metrics"></section>
+    <div class="grid">
+      <section class="panel span-2">
+        <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><p class="eyebrow">PROJECTS</p><h2>Work distribution</h2></div></div>
+        <div id="projects" class="stack"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><p class="eyebrow">MODELS</p><h2>Token ledger</h2></div><span class="hint">Recorded jobs</span></div>
+        <div id="models" class="stack"></div>
+      </section>
+    </div>
+    <p class="error" id="error" role="alert" hidden></p>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

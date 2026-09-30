@@ -1,0 +1,11 @@
+[project]
+name = "local-ai-operations-dashboard"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.116", "httpx>=0.28", "uvicorn>=0.35"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
