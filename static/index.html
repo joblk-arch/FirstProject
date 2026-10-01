@@ -35,6 +35,15 @@
     </div>
     <p class="error" id="error" role="alert" hidden></p>
   </main>
+  <dialog id="workflow-dialog" class="workflow-dialog" aria-labelledby="workflow-title">
+    <div class="drawer-shell">
+      <header class="drawer-head">
+        <div><p class="eyebrow">WORKFLOW DETAIL</p><h2 id="workflow-title">Workflow</h2></div>
+        <button id="workflow-close" class="icon-button" type="button" aria-label="Close workflow detail">×</button>
+      </header>
+      <div id="workflow-content" class="drawer-content" aria-live="polite"></div>
+    </div>
+  </dialog>
   <script src="/app.js" defer></script>
 </body>
 </html>
