@@ -1,10 +1,11 @@
 import hmac
 import base64
 import os
+import re
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
@@ -55,6 +56,89 @@ async def dashboard():
         )
         response.raise_for_status()
         return response.json()
+
+
+def _project_stage(raw: dict) -> dict:
+    """Project a single stage to the strict read-only allow-list."""
+    return {
+        "stage": raw.get("stage"),
+        "role": raw.get("role"),
+        "status": raw.get("status"),
+        "duration_seconds": raw.get("duration_seconds"),
+        "model": raw.get("model"),
+        "prompt_tokens": raw.get("prompt_tokens"),
+        "completion_tokens": raw.get("completion_tokens"),
+        "total_tokens": raw.get("total_tokens"),
+        "report": raw.get("report") if isinstance(raw.get("report"), str) else "",
+    }
+
+
+def _project_workflow(raw: dict) -> dict:
+    """Project gateway workflow data to the strict read-only allow-list.
+
+    Only safe, read-only fields are included. Prompts, secrets, credentials,
+    internal URLs, filesystem/worktree paths, stack traces, and mutation
+    controls are never passed through.
+    """
+    workflow_raw = raw.get("workflow")
+    if not isinstance(workflow_raw, dict):
+        workflow_raw = {}
+    stages_raw = raw.get("stages")
+    if not isinstance(stages_raw, list):
+        stages_raw = []
+
+    result: dict = {
+        "id": workflow_raw.get("id"),
+        "objective": workflow_raw.get("objective"),
+        "project": workflow_raw.get("project"),
+        "status": workflow_raw.get("overall"),
+        "elapsed_seconds": workflow_raw.get("elapsed_seconds"),
+        "stages": [
+            _project_stage(s) for s in stages_raw if isinstance(s, dict)
+        ],
+        "tester_evidence": raw.get("tester_evidence")
+        if isinstance(raw.get("tester_evidence"), str) else None,
+        "reviewer_verdict": raw.get("reviewer_verdict")
+        if raw.get("reviewer_verdict") in {"APPROVE", "REJECT"} else None,
+    }
+
+    # Diff text only when the gateway safely provides it as a string.
+    diff = raw.get("diff")
+    if isinstance(diff, str):
+        result["diff"] = diff
+
+    return result
+
+
+@app.get("/api/workflows/{workflow_id}")
+async def workflow_detail(workflow_id: str):
+    if re.fullmatch(r"[0-9a-f]{10}", workflow_id) is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.get(
+                f"{GATEWAY_URL}/v1/workflows/{workflow_id}/result",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Upstream gateway unavailable")
+
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="Upstream gateway error")
+
+    try:
+        raw = response.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Invalid upstream response")
+
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=502, detail="Invalid upstream response")
+
+    return _project_workflow(raw)
 
 
 @app.get("/health")
