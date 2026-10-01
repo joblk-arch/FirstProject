@@ -1,0 +1,33 @@
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.identity {
+  color: var(--blue);
+  border: 1px solid #315064;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: .75rem;
+}
+
+.permission-note {
+  margin: 18px 0 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: .8rem;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .session-bar { gap: 8px; }
+  .identity {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

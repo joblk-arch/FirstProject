@@ -1,7 +1,12 @@
 import hmac
 import base64
+import hashlib
+import json
 import os
 import re
+import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -16,21 +21,79 @@ from starlette.responses import Response
 GATEWAY_URL = os.getenv("AGENT_GATEWAY_URL", "http://host.docker.internal:8765").rstrip("/")
 GATEWAY_KEY_FILE = Path(os.getenv("AGENT_GATEWAY_KEY_FILE", "/run/secrets/agent_gateway_key"))
 PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboard_password"))
+USERS_FILE = Path(os.getenv("DASHBOARD_USERS_FILE", "/run/secrets/dashboard_users"))
+AUDIT_LOG_FILE = Path(os.getenv("DASHBOARD_AUDIT_LOG_FILE", "/tmp/local-ai-dashboard-audit.jsonl"))
 USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 WORKFLOW_ACTIONS = {"retry", "rereview", "approve", "merge", "push", "cleanup"}
+ACTION_ROLES = {
+    "retry": {"operator", "admin"},
+    "rereview": {"operator", "admin"},
+    "approve": {"admin"},
+    "merge": {"admin"},
+    "push": {"admin"},
+    "cleanup": {"admin"},
+}
+VALID_ROLES = {"viewer", "operator", "admin"}
+_audit_lock = threading.Lock()
 
 app = FastAPI(title="Local AI Operations")
 security = HTTPBasic()
 
 
-def authenticate(credentials: HTTPBasicCredentials) -> str:
+def _verify_password(password: str, record: dict) -> bool:
+    try:
+        role = record["role"]
+        salt = bytes.fromhex(record["salt"])
+        expected = bytes.fromhex(record["password_hash"])
+        iterations = int(record.get("iterations", 600_000))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if role not in VALID_ROLES or iterations < 100_000:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return hmac.compare_digest(actual, expected)
+
+
+def authenticate_identity(credentials: HTTPBasicCredentials) -> tuple[str, str]:
+    if USERS_FILE.is_file():
+        try:
+            users = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise ValueError("Invalid credentials")
+        record = users.get(credentials.username) if isinstance(users, dict) else None
+        if not isinstance(record, dict) or not _verify_password(credentials.password, record):
+            raise ValueError("Invalid credentials")
+        return credentials.username, record["role"]
+
     expected_password = PASSWORD_FILE.read_text(encoding="utf-8").strip()
     valid = hmac.compare_digest(credentials.username, USERNAME) and hmac.compare_digest(
         credentials.password, expected_password
     )
     if not valid:
         raise ValueError("Invalid credentials")
-    return credentials.username
+    return credentials.username, "admin"
+
+
+def authenticate(credentials: HTTPBasicCredentials) -> str:
+    return authenticate_identity(credentials)[0]
+
+
+def _audit(request: Request, workflow_id: str, action: str, outcome: str) -> None:
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_id": uuid.uuid4().hex,
+        "actor": getattr(request.state, "username", "unknown"),
+        "role": getattr(request.state, "role", "unknown"),
+        "workflow_id": workflow_id,
+        "action": action,
+        "outcome": outcome,
+        "source_ip": request.client.host if request.client else None,
+    }
+    AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with _audit_lock, AUDIT_LOG_FILE.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 @app.middleware("http")
@@ -42,10 +105,19 @@ async def require_authentication(request: Request, call_next):
         if scheme.lower() != "basic":
             raise ValueError
         username, password = base64.b64decode(value).decode("utf-8").split(":", 1)
-        authenticate(HTTPBasicCredentials(username=username, password=password))
+        username, role = authenticate_identity(
+            HTTPBasicCredentials(username=username, password=password)
+        )
     except (ValueError, UnicodeDecodeError):
         return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Local AI Operations"'})
+    request.state.username = username
+    request.state.role = role
     return await call_next(request)
+
+
+@app.get("/api/session")
+async def session(request: Request):
+    return {"username": request.state.username, "role": request.state.role}
 
 
 @app.get("/api/dashboard")
@@ -148,11 +220,22 @@ class WorkflowActionRequest(BaseModel):
 
 
 @app.post("/api/workflows/{workflow_id}/actions/{action}")
-async def workflow_action(workflow_id: str, action: str, request: WorkflowActionRequest):
+async def workflow_action(
+    workflow_id: str,
+    action: str,
+    payload: WorkflowActionRequest,
+    request: Request,
+):
     if re.fullmatch(r"[0-9a-f]{10}", workflow_id) is None or action not in WORKFLOW_ACTIONS:
         raise HTTPException(status_code=404, detail="Workflow action not found")
-    if request.confirm != workflow_id:
+    if request.state.role not in ACTION_ROLES[action]:
+        _audit(request, workflow_id, action, "denied")
+        raise HTTPException(status_code=403, detail="Your role cannot perform this action")
+    if payload.confirm != workflow_id:
+        _audit(request, workflow_id, action, "confirmation_rejected")
         raise HTTPException(status_code=400, detail="Workflow confirmation does not match")
+
+    _audit(request, workflow_id, action, "attempted")
 
     key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
     async with httpx.AsyncClient(timeout=60) as client:
@@ -163,15 +246,19 @@ async def workflow_action(workflow_id: str, action: str, request: WorkflowAction
                 json={"confirm": workflow_id},
             )
         except httpx.HTTPError:
+            _audit(request, workflow_id, action, "upstream_unavailable")
             raise HTTPException(status_code=502, detail="Upstream gateway unavailable")
 
     if response.status_code == 409:
+        _audit(request, workflow_id, action, "state_rejected")
         raise HTTPException(
             status_code=409,
             detail="Action is not valid for the workflow's current state",
         )
     if response.status_code >= 400:
+        _audit(request, workflow_id, action, "upstream_failed")
         raise HTTPException(status_code=502, detail="Upstream gateway error")
+    _audit(request, workflow_id, action, "succeeded")
     return {"ok": True, "action": action}
 
 

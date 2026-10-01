@@ -5,11 +5,15 @@ services:
     environment:
       AGENT_GATEWAY_URL: http://host.docker.internal:8765
       DASHBOARD_USERNAME: admin
+      DASHBOARD_USERS_FILE: /data/users.json
+      DASHBOARD_AUDIT_LOG_FILE: /data/audit.jsonl
     secrets:
       - agent_gateway_key
       - dashboard_password
     ports:
       - "192.168.68.68:8088:8080"
+    volumes:
+      - /Users/jkutner/.local/share/m1-agent/dashboard-data:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
       interval: 15s

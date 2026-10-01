@@ -54,6 +54,13 @@ def auth_headers() -> dict:
     return {"Authorization": _basic_auth("admin", "test-pass")}
 
 
+@pytest.fixture(autouse=True)
+def isolated_identity_and_audit(tmp_path: Path):
+    with patch.object(app, "USERS_FILE", tmp_path / "missing-users.json"), \
+         patch.object(app, "AUDIT_LOG_FILE", tmp_path / "audit.jsonl"):
+        yield
+
+
 # --- Existing authentication tests ---
 
 
@@ -258,3 +265,61 @@ def test_workflow_action_maps_gateway_conflict(password_file, gateway_key_file, 
     assert response.status_code == 409
     assert response.json()["detail"] == "Action is not valid for the workflow's current state"
     assert "unsafe" not in response.text
+
+
+def _user_record(password: str, role: str) -> dict:
+    salt = b"0123456789abcdef"
+    iterations = 100_000
+    digest = app.hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return {
+        "role": role,
+        "salt": salt.hex(),
+        "password_hash": digest.hex(),
+        "iterations": iterations,
+    }
+
+
+def test_named_viewer_session_and_admin_action_denial(tmp_path: Path):
+    users_file = tmp_path / "users.json"
+    users_file.write_text(
+        app.json.dumps({"reader": _user_record("viewer-password", "viewer")}),
+        encoding="utf-8",
+    )
+    audit_file = tmp_path / "audit.jsonl"
+    headers = {"Authorization": _basic_auth("reader", "viewer-password")}
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file):
+        client = TestClient(app.app)
+        session = client.get("/api/session", headers=headers)
+        denied = client.post(
+            "/api/workflows/0123456789/actions/approve",
+            headers=headers,
+            json={"confirm": "0123456789"},
+        )
+    assert session.json() == {"username": "reader", "role": "viewer"}
+    assert denied.status_code == 403
+    audit = app.json.loads(audit_file.read_text(encoding="utf-8"))
+    assert audit["actor"] == "reader"
+    assert audit["role"] == "viewer"
+    assert audit["action"] == "approve"
+    assert audit["outcome"] == "denied"
+
+
+def test_successful_action_appends_attempt_and_success_audit(
+    password_file, gateway_key_file, auth_headers, tmp_path: Path
+):
+    audit_file = tmp_path / "action-audit.jsonl"
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows/0123456789/actions/approve",
+            headers=auth_headers,
+            json={"confirm": "0123456789"},
+        )
+    assert response.status_code == 200
+    entries = [app.json.loads(line) for line in audit_file.read_text().splitlines()]
+    assert [entry["outcome"] for entry in entries] == ["attempted", "succeeded"]
+    assert all(entry["actor"] == "admin" for entry in entries)

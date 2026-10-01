@@ -5,6 +5,7 @@ const safe = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<'
 const dialog = $('workflow-dialog');
 const workflowContent = $('workflow-content');
 let activeWorkflowId = null;
+let sessionIdentity = {username:'',role:'viewer'};
 
 function render(data) {
   const jobs = data.jobs || [], usage = data.usage || [], counts = data.counts || [];
@@ -35,13 +36,15 @@ function workflowActions(workflow) {
   const tester = stages.find((stage) => stage.stage === 'test');
   const reviewer = stages.find((stage) => stage.stage === 'review');
   const actions = [];
-  if (['failed','blocked'].includes(workflow.status)) actions.push(['retry','Retry failed stage']);
-  if (workflow.reviewer_verdict === 'REJECT' && reviewer?.status === 'completed') actions.push(['rereview','Run review again']);
-  if (workflow.reviewer_verdict === 'APPROVE' && tester?.status === 'completed') actions.push(['approve','Approve changes']);
-  if (tester?.status === 'approved') actions.push(['merge','Merge into main']);
-  if (tester?.status === 'merged') actions.push(['push','Push to GitHub']);
-  if (tester?.status === 'pushed') actions.push(['cleanup','Clean up worktree']);
-  if (!actions.length) return '';
+  const canOperate = ['operator','admin'].includes(sessionIdentity.role);
+  const isAdmin = sessionIdentity.role === 'admin';
+  if (canOperate && ['failed','blocked'].includes(workflow.status)) actions.push(['retry','Retry failed stage']);
+  if (canOperate && workflow.reviewer_verdict === 'REJECT' && reviewer?.status === 'completed') actions.push(['rereview','Run review again']);
+  if (isAdmin && workflow.reviewer_verdict === 'APPROVE' && tester?.status === 'completed') actions.push(['approve','Approve changes']);
+  if (isAdmin && tester?.status === 'approved') actions.push(['merge','Merge into main']);
+  if (isAdmin && tester?.status === 'merged') actions.push(['push','Push to GitHub']);
+  if (isAdmin && tester?.status === 'pushed') actions.push(['cleanup','Clean up worktree']);
+  if (!actions.length) return sessionIdentity.role === 'viewer' ? '<p class="permission-note">View-only access</p>' : '';
   return `<section class="workflow-actions" aria-label="Workflow actions"><div><h3>Workflow controls</h3><p>Each action is validated by the agent gateway and requires confirmation.</p></div><div class="action-buttons">${actions.map(([action,label])=>`<button type="button" class="action-button ${['merge','push'].includes(action)?'primary':''}" data-workflow-action="${action}">${label}</button>`).join('')}</div><p id="action-status" class="action-status" role="status" aria-live="polite"></p></section>`;
 }
 
@@ -95,10 +98,17 @@ async function load() {
   catch(error) { $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
 }
 
+async function loadSession() {
+  const response = await fetch('/api/session',{cache:'no-store'});
+  if (!response.ok) throw new Error(`Session returned ${response.status}`);
+  sessionIdentity = await response.json();
+  $('identity').textContent = `${sessionIdentity.username} · ${sessionIdentity.role}`;
+}
+
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);const action=event.target.closest('[data-workflow-action]');if(action)runWorkflowAction(action.dataset.workflowAction);});
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
 $('refresh').addEventListener('click',load);
-load();
-setInterval(load,15000);
+async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await load();setInterval(load,15000);}
+initialize();
