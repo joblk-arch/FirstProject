@@ -323,3 +323,24 @@ def test_successful_action_appends_attempt_and_success_audit(
     entries = [app.json.loads(line) for line in audit_file.read_text().splitlines()]
     assert [entry["outcome"] for entry in entries] == ["attempted", "succeeded"]
     assert all(entry["actor"] == "admin" for entry in entries)
+
+
+# --- Local agent proof documentation ---
+
+
+def test_local_agent_proof_file_exists():
+    proof = Path(__file__).resolve().parent.parent / "docs" / "local-agent-proof.md"
+    assert proof.is_file(), "docs/local-agent-proof.md must exist"
+
+
+def test_local_agent_proof_mentions_telegram():
+    proof = Path(__file__).resolve().parent.parent / "docs" / "local-agent-proof.md"
+    content = proof.read_text(encoding="utf-8")
+    assert "telegram" in content.lower(), "Proof file must mention Telegram"
+
+
+def test_local_agent_proof_is_short():
+    proof = Path(__file__).resolve().parent.parent / "docs" / "local-agent-proof.md"
+    content = proof.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    assert len(lines) <= 20, f"Proof file should be short, got {len(lines)} lines"
