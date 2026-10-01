@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import Response
@@ -16,6 +17,7 @@ GATEWAY_URL = os.getenv("AGENT_GATEWAY_URL", "http://host.docker.internal:8765")
 GATEWAY_KEY_FILE = Path(os.getenv("AGENT_GATEWAY_KEY_FILE", "/run/secrets/agent_gateway_key"))
 PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboard_password"))
 USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
+WORKFLOW_ACTIONS = {"retry", "rereview", "approve", "merge", "push", "cleanup"}
 
 app = FastAPI(title="Local AI Operations")
 security = HTTPBasic()
@@ -139,6 +141,38 @@ async def workflow_detail(workflow_id: str):
         raise HTTPException(status_code=502, detail="Invalid upstream response")
 
     return _project_workflow(raw)
+
+
+class WorkflowActionRequest(BaseModel):
+    confirm: str
+
+
+@app.post("/api/workflows/{workflow_id}/actions/{action}")
+async def workflow_action(workflow_id: str, action: str, request: WorkflowActionRequest):
+    if re.fullmatch(r"[0-9a-f]{10}", workflow_id) is None or action not in WORKFLOW_ACTIONS:
+        raise HTTPException(status_code=404, detail="Workflow action not found")
+    if request.confirm != workflow_id:
+        raise HTTPException(status_code=400, detail="Workflow confirmation does not match")
+
+    key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            response = await client.post(
+                f"{GATEWAY_URL}/v1/workflows/{workflow_id}/actions/{action}",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"confirm": workflow_id},
+            )
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Upstream gateway unavailable")
+
+    if response.status_code == 409:
+        raise HTTPException(
+            status_code=409,
+            detail="Action is not valid for the workflow's current state",
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="Upstream gateway error")
+    return {"ok": True, "action": action}
 
 
 @app.get("/health")

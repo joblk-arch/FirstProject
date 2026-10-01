@@ -4,6 +4,7 @@ const duration = (n) => n == null ? '—' : n < 60 ? `${n}s` : `${Math.floor(n /
 const safe = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const dialog = $('workflow-dialog');
 const workflowContent = $('workflow-content');
+let activeWorkflowId = null;
 
 function render(data) {
   const jobs = data.jobs || [], usage = data.usage || [], counts = data.counts || [];
@@ -29,16 +30,33 @@ function stageCard(stage,index) {
   return `<article class="stage-card"><div class="stage-order" aria-hidden="true">${index+1}</div><div class="stage-body"><div class="stage-head"><div><span class="stage-role">${safe(stage.stage||stage.role)}</span><strong>${safe(stage.role||'agent')}</strong></div><span class="status ${safe(stage.status)}">${safe(stage.status)}</span></div><dl class="stage-meta"><div><dt>Duration</dt><dd>${duration(stage.duration_seconds)}</dd></div><div><dt>Model</dt><dd>${safe(stage.model||'Not recorded')}</dd></div><div><dt>Tokens</dt><dd>${tokens}</dd></div><div><dt>Input / output</dt><dd>${stage.prompt_tokens==null?'—':`${fmt(stage.prompt_tokens)} / ${fmt(stage.completion_tokens)}`}</dd></div></dl>${report}</div></article>`;
 }
 
+function workflowActions(workflow) {
+  const stages = workflow.stages || [];
+  const tester = stages.find((stage) => stage.stage === 'test');
+  const reviewer = stages.find((stage) => stage.stage === 'review');
+  const actions = [];
+  if (['failed','blocked'].includes(workflow.status)) actions.push(['retry','Retry failed stage']);
+  if (workflow.reviewer_verdict === 'REJECT' && reviewer?.status === 'completed') actions.push(['rereview','Run review again']);
+  if (workflow.reviewer_verdict === 'APPROVE' && tester?.status === 'completed') actions.push(['approve','Approve changes']);
+  if (tester?.status === 'approved') actions.push(['merge','Merge into main']);
+  if (tester?.status === 'merged') actions.push(['push','Push to GitHub']);
+  if (tester?.status === 'pushed') actions.push(['cleanup','Clean up worktree']);
+  if (!actions.length) return '';
+  return `<section class="workflow-actions" aria-label="Workflow actions"><div><h3>Workflow controls</h3><p>Each action is validated by the agent gateway and requires confirmation.</p></div><div class="action-buttons">${actions.map(([action,label])=>`<button type="button" class="action-button ${['merge','push'].includes(action)?'primary':''}" data-workflow-action="${action}">${label}</button>`).join('')}</div><p id="action-status" class="action-status" role="status" aria-live="polite"></p></section>`;
+}
+
 function renderWorkflow(workflow) {
+  activeWorkflowId = workflow.id;
   $('workflow-title').textContent = workflow.objective || 'Workflow';
   const stages = workflow.stages || [];
   const evidence = workflow.tester_evidence ? `<section class="detail-section"><h3>Tester evidence</h3><pre class="report">${safe(workflow.tester_evidence)}</pre></section>` : '';
   const review = workflow.reviewer_verdict ? `<span class="verdict ${workflow.reviewer_verdict.toLowerCase()}">${safe(workflow.reviewer_verdict)}</span>` : '<span class="hint">Pending</span>';
   const diff = workflow.diff ? `<section class="detail-section"><details><summary>Unmerged Git diff</summary><pre class="diff"><code>${safe(workflow.diff)}</code></pre></details></section>` : '<section class="detail-section empty-detail"><h3>Unmerged Git diff</h3><p>No diff is available for this workflow.</p></section>';
-  workflowContent.innerHTML = `<section class="workflow-summary"><div><span>Project</span><strong>${safe(workflow.project||'Unknown')}</strong></div><div><span>Status</span><strong class="status ${safe(workflow.status)}">${safe(workflow.status||'Unknown')}</strong></div><div><span>Duration</span><strong>${duration(workflow.elapsed_seconds)}</strong></div><div><span>Review</span>${review}</div></section><section class="detail-section"><div class="section-title"><h3>Ordered stages</h3><span class="hint">${stages.length} stages</span></div>${stages.length?`<div class="timeline">${stages.map(stageCard).join('')}</div>`:'<p class="empty-detail">No stages are available for this workflow.</p>'}</section>${evidence}${diff}`;
+  workflowContent.innerHTML = `<section class="workflow-summary"><div><span>Project</span><strong>${safe(workflow.project||'Unknown')}</strong></div><div><span>Status</span><strong class="status ${safe(workflow.status)}">${safe(workflow.status||'Unknown')}</strong></div><div><span>Duration</span><strong>${duration(workflow.elapsed_seconds)}</strong></div><div><span>Review</span>${review}</div></section>${workflowActions(workflow)}<section class="detail-section"><div class="section-title"><h3>Ordered stages</h3><span class="hint">${stages.length} stages</span></div>${stages.length?`<div class="timeline">${stages.map(stageCard).join('')}</div>`:'<p class="empty-detail">No stages are available for this workflow.</p>'}</section>${evidence}${diff}`;
 }
 
 async function openWorkflow(workflowId) {
+  activeWorkflowId = workflowId;
   $('workflow-title').textContent = 'Loading workflow…';
   workflowContent.innerHTML = '<div class="drawer-state"><span class="spinner" aria-hidden="true"></span><p>Loading workflow details…</p></div>';
   if (!dialog.open) dialog.showModal();
@@ -52,13 +70,33 @@ async function openWorkflow(workflowId) {
   }
 }
 
+async function runWorkflowAction(action) {
+  if (!activeWorkflowId) return;
+  const labels = {retry:'retry the failed stage',rereview:'run the reviewer again',approve:'approve these changes',merge:'merge these changes into main',push:'push main to GitHub',cleanup:'remove the completed worktree'};
+  if (!window.confirm(`Confirm you want to ${labels[action] || action}?\n\nWorkflow: ${activeWorkflowId}`)) return;
+  const status = $('action-status');
+  const buttons = workflowContent.querySelectorAll('[data-workflow-action]');
+  buttons.forEach((button)=>button.disabled=true);
+  if (status) status.textContent = `Running ${action}…`;
+  try {
+    const response = await fetch(`/api/workflows/${encodeURIComponent(activeWorkflowId)}/actions/${encodeURIComponent(action)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:activeWorkflowId})});
+    const result = await response.json().catch(()=>({}));
+    if (!response.ok) throw new Error(result.detail || `Action returned ${response.status}.`);
+    await openWorkflow(activeWorkflowId);
+    await load();
+  } catch (error) {
+    buttons.forEach((button)=>button.disabled=false);
+    if (status) status.textContent = error.message;
+  }
+}
+
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
   catch(error) { $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
 }
 
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
-workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);});
+workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);const action=event.target.closest('[data-workflow-action]');if(action)runWorkflowAction(action.dataset.workflowAction);});
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
 $('refresh').addEventListener('click',load);

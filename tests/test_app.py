@@ -31,6 +31,7 @@ def _make_async_client_mock(gateway_response):
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
     mock_client.get = AsyncMock(return_value=gateway_response)
+    mock_client.post = AsyncMock(return_value=gateway_response)
     return mock_client
 
 
@@ -208,3 +209,52 @@ def test_workflow_detail_upstream_connection_error(password_file, gateway_key_fi
 
     assert response.status_code == 502
     assert response.json()["detail"] == "Upstream gateway unavailable"
+
+
+def test_workflow_action_proxies_allowlisted_action(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows/0123456789/actions/approve",
+            headers=auth_headers,
+            json={"confirm": "0123456789"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "action": "approve"}
+    call = mock_client.post.await_args
+    assert call.args[0].endswith("/v1/workflows/0123456789/actions/approve")
+    assert call.kwargs["json"] == {"confirm": "0123456789"}
+
+
+def test_workflow_action_rejects_unknown_action_or_confirmation(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        client = TestClient(app.app)
+        unknown = client.post(
+            "/api/workflows/0123456789/actions/delete",
+            headers=auth_headers,
+            json={"confirm": "0123456789"},
+        )
+        mismatch = client.post(
+            "/api/workflows/0123456789/actions/approve",
+            headers=auth_headers,
+            json={"confirm": "aaaaaaaaaa"},
+        )
+    assert unknown.status_code == 404
+    assert mismatch.status_code == 400
+
+
+def test_workflow_action_maps_gateway_conflict(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(409, {"error": "unsafe detail"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows/0123456789/actions/retry",
+            headers=auth_headers,
+            json={"confirm": "0123456789"},
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Action is not valid for the workflow's current state"
+    assert "unsafe" not in response.text
