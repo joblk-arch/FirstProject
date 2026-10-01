@@ -21,6 +21,25 @@ function render(data) {
   const byProject = Object.groupBy ? Object.groupBy(counts,(x) => x.project) : counts.reduce((all,x) => ((all[x.project] ??= []).push(x),all),{});
   $('projects').innerHTML = data.projects.map((project) => { const rows=byProject[project.name]||[]; const total=rows.reduce((n,x)=>n+x.count,0); const running=rows.filter((x)=>['running','queued'].includes(x.status)).reduce((n,x)=>n+x.count,0); const width=Math.min(100,total?Math.max(5,running/total*100):0); return `<div class="item"><div class="item-row"><strong>${safe(project.name)}</strong><span>${total} jobs</span></div><small>${safe(project.default_branch)} · ${running} active</small><div class="bar"><i style="width:${width}%"></i></div></div>`; }).join('');
   $('models').innerHTML = usage.length ? usage.map((item) => `<div class="item"><div class="item-row"><strong>${safe((item.model||'Unknown').split('/').pop())}</strong><span>${fmt(item.total_tokens)}</span></div><small>${safe(item.project)} · ${item.jobs} jobs · ${fmt(item.prompt_tokens)} in / ${fmt(item.completion_tokens)} out</small></div>`).join('') : '<div class="empty">Token accounting begins with the next agent job.</div>';
+  const workflows = Array.isArray(data.recent_workflows) ? data.recent_workflows : [];
+  const sorted = workflows.slice().sort((a, b) => {
+    const ta = Date.parse(a.created_at) || 0;
+    const tb = Date.parse(b.created_at) || 0;
+    return tb - ta;
+  });
+  $('workflows').innerHTML = sorted.length ? sorted.map((w) => {
+    const id = w.id ? safe(w.id) : '';
+    const objective = w.objective != null ? safe(w.objective) : '—';
+    const status = w.overall != null ? safe(w.overall) : 'unknown';
+    const origin = w.origin != null ? safe(w.origin) : '—';
+    const models = Array.isArray(w.models) ? w.models.map((m) => safe(m)).join(', ') : (w.models != null ? safe(w.models) : '—');
+    const stageCounts = w.stage_counts != null ? (typeof w.stage_counts === 'object' ? Object.entries(w.stage_counts).map(([k, v]) => `${safe(k)}:${safe(v)}`).join(' ') : safe(w.stage_counts)) : '—';
+    const tokens = w.total_tokens == null ? '—' : `${fmt(w.prompt_tokens)} / ${fmt(w.completion_tokens)} / ${fmt(w.total_tokens)}`;
+    const created = w.created_at ? new Date(w.created_at).toLocaleString() : '—';
+    const label = w.project != null ? safe(w.project) : 'Unknown';
+    const link = id ? `<button class="workflow-link" type="button" data-workflow-id="${id}" aria-label="Open ${label} workflow details">${label}</button>` : label;
+    return `<tr><td>${link}</td><td>${objective}</td><td><span class="status ${status}">${status}</span></td><td>${origin}</td><td>${models}</td><td>${stageCounts}</td><td>${tokens}</td><td>${created}</td></tr>`;
+  }).join('') : '<tr><td colspan="8" class="empty">No workflows recorded yet.</td></tr>';
   $('updated').textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
   $('error').hidden = true;
 }
@@ -106,6 +125,7 @@ async function loadSession() {
 }
 
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
+$('workflows').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);const action=event.target.closest('[data-workflow-action]');if(action)runWorkflowAction(action.dataset.workflowAction);});
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});

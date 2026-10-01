@@ -325,6 +325,137 @@ def test_successful_action_appends_attempt_and_success_audit(
     assert all(entry["actor"] == "admin" for entry in entries)
 
 
+# --- Dashboard: recent_workflows pass-through contract ---
+
+
+def _dashboard_payload():
+    return {
+        "jobs": [{"stage": "test", "project": "p1", "status": "running", "model": "m1", "total_tokens": 100, "duration_seconds": 5, "workflow_id": "0123456789"}],
+        "usage": [{"model": "m1", "project": "p1", "jobs": 1, "prompt_tokens": 60, "completion_tokens": 40, "total_tokens": 100}],
+        "counts": [{"project": "p1", "status": "running", "count": 1}],
+        "projects": [{"name": "p1", "default_branch": "main"}],
+        "recent_workflows": [
+            {
+                "id": "0123456789",
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "overall": "running",
+                "origin": "telegram",
+                "models": ["local-model"],
+                "stage_counts": {"plan": 1, "test": 1},
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "created_at": "2025-01-15T10:00:00Z",
+            }
+        ],
+        "generated_at": "2025-01-15T10:00:00Z",
+    }
+
+
+def test_dashboard_passes_through_recent_workflows(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "recent_workflows" in data
+    assert data["recent_workflows"][0]["id"] == "0123456789"
+    assert data["recent_workflows"][0]["objective"] == "Build feature X"
+    assert data["recent_workflows"][0]["overall"] == "running"
+    assert data["recent_workflows"][0]["origin"] == "telegram"
+    assert data["recent_workflows"][0]["models"] == ["local-model"]
+    assert data["recent_workflows"][0]["stage_counts"] == {"plan": 1, "test": 1}
+    assert data["recent_workflows"][0]["prompt_tokens"] == 100
+    assert data["recent_workflows"][0]["completion_tokens"] == 50
+    assert data["recent_workflows"][0]["total_tokens"] == 150
+    assert data["recent_workflows"][0]["created_at"] == "2025-01-15T10:00:00Z"
+
+
+def test_dashboard_handles_missing_recent_workflows(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload()
+    del payload["recent_workflows"]
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "recent_workflows" not in data
+
+
+def test_dashboard_requires_auth(gateway_key_file):
+    with patch.object(app, "PASSWORD_FILE", gateway_key_file):
+        client = TestClient(app.app)
+        response = client.get("/api/dashboard")
+    assert response.status_code == 401
+
+
+# --- Frontend source contract: recent_workflows rendering ---
+
+
+def test_frontend_html_has_workflows_section():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="workflows"' in html
+    assert "Recent workflows" in html
+
+
+def test_frontend_js_renders_recent_workflows():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "recent_workflows" in js
+    assert "w.objective" in js
+    assert "w.overall" in js
+    assert "stage_counts" in js
+    assert "created_at" in js
+    assert "data-workflow-id" in js
+    assert "safe(" in js
+
+
+def test_frontend_js_uses_groupby_guard():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "Object.groupBy ?" in js
+
+
+def test_frontend_js_workflows_click_opens_detail():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    # The #workflows tbody must have a click listener that delegates to openWorkflow
+    assert "$('workflows').addEventListener('click'" in js
+    assert "openWorkflow(trigger.dataset.workflowId)" in js
+
+
+def test_frontend_js_workflows_empty_state():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    # Graceful empty state when no workflows are present
+    assert "No workflows recorded yet." in js
+
+
+def test_frontend_js_workflows_sorted_newest_first():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    # Must sort by created_at in descending order (newest first)
+    assert "Date.parse(a.created_at)" in js
+    assert "Date.parse(b.created_at)" in js
+    # The sort comparator returns tb - ta (descending)
+    assert "return tb - ta" in js
+
+
+def test_frontend_js_workflows_renders_origin_and_tokens():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "w.origin" in js
+    assert "w.prompt_tokens" in js
+    assert "w.completion_tokens" in js
+    assert "w.total_tokens" in js
+
+
+def test_frontend_html_workflows_table_has_all_columns():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    for col in ["Project", "Objective", "Status", "Origin", "Models", "Stages", "Tokens", "Created"]:
+        assert col in html, f"Missing column: {col}"
+
+
 # --- Local agent proof documentation ---
 
 
