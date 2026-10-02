@@ -4,6 +4,7 @@ services:
     restart: unless-stopped
     environment:
       AGENT_GATEWAY_URL: http://host.docker.internal:8765
+      AGENT_GATEWAY_ALLOWED_PROJECTS: firstproject,infrastructure
       DASHBOARD_USERNAME: admin
       DASHBOARD_USERS_FILE: /data/users.json
       DASHBOARD_AUDIT_LOG_FILE: /data/audit.jsonl

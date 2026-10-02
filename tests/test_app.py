@@ -1,4 +1,5 @@
 import base64
+import re
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -475,3 +476,827 @@ def test_local_agent_proof_is_short():
     content = proof.read_text(encoding="utf-8")
     lines = content.splitlines()
     assert len(lines) <= 20, f"Proof file should be short, got {len(lines)} lines"
+
+
+# --- Start Build: allowed-projects endpoint ---
+
+
+def test_allowed_projects_requires_auth(password_file):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        client = TestClient(app.app)
+        response = client.get("/api/workflows/allowed-projects")
+    assert response.status_code == 401
+
+
+def test_allowed_projects_returns_list(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject", "secondproject"]):
+        client = TestClient(app.app)
+        response = client.get("/api/workflows/allowed-projects", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {"projects": ["firstproject", "secondproject"]}
+
+
+def test_allowed_projects_viewer_can_see(tmp_path: Path, password_file):
+    users_file = tmp_path / "users.json"
+    users_file.write_text(
+        app.json.dumps({"reader": _user_record("viewer-pass", "viewer")}),
+        encoding="utf-8",
+    )
+    headers = {"Authorization": _basic_auth("reader", "viewer-pass")}
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["proj1"]):
+        client = TestClient(app.app)
+        response = client.get("/api/workflows/allowed-projects", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"projects": ["proj1"]}
+
+
+# --- Start Build: role enforcement ---
+
+
+def test_start_build_viewer_denied(tmp_path: Path, password_file):
+    users_file = tmp_path / "users.json"
+    users_file.write_text(
+        app.json.dumps({"reader": _user_record("viewer-pass", "viewer")}),
+        encoding="utf-8",
+    )
+    audit_file = tmp_path / "audit.jsonl"
+    headers = {"Authorization": _basic_auth("reader", "viewer-pass")}
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        client = TestClient(app.app)
+        response = client.post(
+            "/api/workflows",
+            headers=headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 403
+    assert "operator" in response.json()["detail"]
+    audit = app.json.loads(audit_file.read_text(encoding="utf-8"))
+    assert audit["action"] == "start_build"
+    assert audit["outcome"] == "denied"
+
+
+def test_start_build_operator_allowed(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "0123456789", "overall": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "0123456789"
+    assert data["status"] == "queued"
+    assert data["project"] == "firstproject"
+    assert data["objective"] == "Build feature X"
+    assert data["reasoning"] == "standard"
+
+
+# --- Start Build: project allowlisting ---
+
+
+def test_start_build_disallowed_project(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "evil-project",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 400
+    assert "not in the allowed list" in response.json()["detail"]
+
+
+def test_start_build_empty_project(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "   ",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 400
+
+
+# --- Start Build: payload mapping ---
+
+
+def test_start_build_sends_correct_payload_to_gateway(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "0123456789", "overall": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "deep",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    call = mock_client.post.await_args
+    assert call.args[0].endswith("/v1/workflows")
+    assert call.kwargs["json"] == {
+        "project": "firstproject",
+        "objective": "Build feature X",
+        "reasoning": True,
+    }
+    assert call.kwargs["headers"]["Idempotency-Key"] == "123e4567-e89b-12d3-a456-426614174000"
+    assert call.kwargs["headers"]["Authorization"] == "Bearer test-gateway-key"
+
+
+# --- Start Build: reasoning values ---
+
+
+def test_start_build_standard_reasoning(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "0123456789", "overall": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["reasoning"] == "standard"
+
+
+def test_start_build_deep_reasoning(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "0123456789", "overall": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "deep",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["reasoning"] == "deep"
+
+
+def test_start_build_invalid_reasoning(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "turbo",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 400
+    assert "standard" in response.json()["detail"]
+
+
+# --- Start Build: idempotency / double submission ---
+
+
+def test_start_build_gateway_409_duplicate(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(409, {"error": "duplicate"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+    assert "duplicate" not in response.text
+
+
+# --- Start Build: malformed input ---
+
+
+def test_start_build_objective_too_long(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "a" * 2001,
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 400
+    assert "2000" in response.json()["detail"]
+
+
+def test_start_build_objective_control_chars(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build\nfeature\tX",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 400
+    assert "control" in response.json()["detail"]
+
+
+def test_start_build_missing_objective(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "   ",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 400
+
+
+def test_start_build_invalid_idempotency_key(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "not-a-uuid",
+            },
+        )
+    assert response.status_code == 400
+    assert "UUID" in response.json()["detail"]
+
+
+# --- Start Build: upstream behavior ---
+
+
+def test_start_build_gateway_401(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(401, {"error": "invalid key"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Gateway authorization failed"
+    assert "invalid key" not in response.text
+
+
+def test_start_build_gateway_500(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(500, {"error": "internal traceback"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway error"
+    assert "traceback" not in response.text
+
+
+def test_start_build_gateway_connection_error(password_file, gateway_key_file, auth_headers):
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway unavailable"
+
+
+def test_start_build_missing_gateway_key_returns_redacted_502(
+    password_file, auth_headers, tmp_path: Path
+):
+    """A missing/unreadable gateway key file yields a controlled redacted 502, not a 500."""
+    missing_key = tmp_path / "does-not-exist"
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", missing_key), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Gateway credential unavailable"
+    assert "does-not-exist" not in response.text
+    assert "run/secrets" not in response.text
+
+
+def test_start_build_gateway_timeout(password_file, gateway_key_file, auth_headers):
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway unavailable"
+
+
+# --- Start Build: real gateway 202 contract ---
+
+
+def _real_gateway_202_response():
+    """Representative real Agent Gateway POST /v1/workflows success response.
+
+    The deployed gateway returns HTTP 202 and uses the keys ``workflow_id`` and
+    ``overall`` (not ``id``/``status``). Extra fields are included to prove they
+    are projected out and never leaked to the browser.
+    """
+    return _make_gateway_response(
+        202,
+        {
+            "workflow_id": "0123456789",
+            "overall": "queued",
+            "created_at": "2025-01-15T10:00:00Z",
+            "origin": "dashboard",
+            "prompt": "must-not-pass-through",
+        },
+    )
+
+
+def _start_build_body():
+    return {
+        "project": "firstproject",
+        "objective": "Build feature X",
+        "reasoning": "standard",
+        "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+    }
+
+
+def test_start_build_real_gateway_202_contract(password_file, gateway_key_file, auth_headers):
+    """A representative real gateway 202 response with workflow_id/overall succeeds."""
+    mock_client = _make_async_client_mock(_real_gateway_202_response())
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "0123456789"
+    assert data["status"] == "queued"
+    assert data["project"] == "firstproject"
+    assert data["objective"] == "Build feature X"
+    assert data["reasoning"] == "standard"
+    # Extra gateway fields must be projected out, never leaked.
+    assert "created_at" not in data
+    assert "origin" not in data
+    assert "prompt" not in data
+    assert "must-not-pass-through" not in response.text
+
+
+def test_start_build_rejects_wrong_keys(password_file, gateway_key_file, auth_headers):
+    """A 202 response using the old id/status keys must fail (contract mismatch)."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"id": "0123456789", "status": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Invalid upstream response"
+
+
+def test_start_build_accepts_200_replay(password_file, gateway_key_file, auth_headers):
+    """A 200 replay of a completed idempotency key with valid keys is accepted."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(200, {"workflow_id": "0123456789", "overall": "completed"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "0123456789"
+    assert data["status"] == "completed"
+    assert data["pending"] is False
+
+
+def test_start_build_rejects_invalid_workflow_id(password_file, gateway_key_file, auth_headers):
+    """A 202 response with a malformed workflow_id must fail (strict validation)."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "not-a-valid-id", "overall": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Invalid upstream response"
+
+
+# --- Start Build: idempotency lifecycle (200 replay / 202 processing) ---
+
+
+def test_start_build_lost_response_replay_reuses_key(password_file, gateway_key_file, auth_headers):
+    """First request creates a workflow (202) but the response is lost; the second
+    submission reuses the exact idempotency key, the gateway returns a 200 replay,
+    and the UI receives the original workflow ID. No second workflow is created
+    because the gateway deduplicates by the same Idempotency-Key."""
+    first = _make_gateway_response(202, {"workflow_id": "0123456789", "overall": "queued"})
+    second = _make_gateway_response(200, {"workflow_id": "0123456789", "overall": "completed"})
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=[first, second])
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        client = TestClient(app.app)
+        # First submission: gateway creates the workflow (202). The client's
+        # response is "lost" in this scenario, but the key is retained.
+        client.post("/api/workflows", headers=auth_headers, json=_start_build_body())
+        # Second submission reuses the exact same idempotency key.
+        response = client.post("/api/workflows", headers=auth_headers, json=_start_build_body())
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == "0123456789"
+    assert data["status"] == "completed"
+    assert data["pending"] is False
+    # Both gateway calls must carry the same Idempotency-Key so the gateway
+    # deduplicates and does not create a second workflow.
+    keys = [c.kwargs["headers"]["Idempotency-Key"] for c in mock_client.post.await_args_list]
+    assert len(keys) == 2
+    assert keys[0] == keys[1] == _start_build_body()["idempotency_key"]
+
+
+def test_start_build_rejects_malformed_200(password_file, gateway_key_file, auth_headers):
+    """A 200 replay with a malformed workflow_id must fail safely (502)."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(200, {"workflow_id": "not-a-valid-id", "overall": "completed"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Invalid upstream response"
+
+
+def test_start_build_rejects_200_missing_overall(password_file, gateway_key_file, auth_headers):
+    """A 200 replay missing a non-empty overall must fail safely (502)."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(200, {"workflow_id": "0123456789"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Invalid upstream response"
+
+
+def test_start_build_202_processing_returns_pending(password_file, gateway_key_file, auth_headers):
+    """A 202 with status=processing (still running) returns a retryable pending
+    state without pretending success and without leaking upstream details."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"status": "processing", "prompt": "must-not-pass-through"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pending"] is True
+    assert data["status"] == "processing"
+    assert data["id"] is None
+    assert "must-not-pass-through" not in response.text
+
+
+def test_start_build_202_processing_with_workflow_id(password_file, gateway_key_file, auth_headers):
+    """A 202 processing response that carries a valid workflow_id preserves it."""
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "0123456789", "status": "processing"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows", headers=auth_headers, json=_start_build_body()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["pending"] is True
+    assert data["status"] == "processing"
+    assert data["id"] == "0123456789"
+
+
+# --- Start Build: token secrecy ---
+
+
+def test_start_build_never_leaks_gateway_key(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(500, {"error": "boom"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert "test-gateway-key" not in response.text
+    assert "test-gateway-key" not in str(response.headers)
+
+
+def test_start_build_never_leaks_gateway_url(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(500, {"error": "boom"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch.object(app, "GATEWAY_URL", "http://internal-secret:9999"), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    assert "internal-secret" not in response.text
+
+
+# --- Start Build: audit logging ---
+
+
+def test_start_build_audit_entries(password_file, gateway_key_file, auth_headers, tmp_path: Path):
+    audit_file = tmp_path / "build-audit.jsonl"
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(202, {"workflow_id": "0123456789", "overall": "queued"})
+    )
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        TestClient(app.app).post(
+            "/api/workflows",
+            headers=auth_headers,
+            json={
+                "project": "firstproject",
+                "objective": "Build feature X",
+                "reasoning": "standard",
+                "idempotency_key": "123e4567-e89b-12d3-a456-426614174000",
+            },
+        )
+    entries = [app.json.loads(line) for line in audit_file.read_text().splitlines()]
+    assert [e["outcome"] for e in entries] == ["attempted", "succeeded"]
+    assert all(e["action"] == "start_build" for e in entries)
+    assert all(e["actor"] == "admin" for e in entries)
+
+
+# --- Frontend source contracts: start build ---
+
+
+def test_frontend_html_has_start_build_form():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="start-build-form"' in html
+    assert 'id="build-project"' in html
+    assert 'id="build-objective"' in html
+    assert 'id="build-submit"' in html
+    assert 'id="build-status"' in html
+    assert 'id="build-char-count"' in html
+
+
+def test_frontend_js_has_start_build_functions():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "startBuild" in js
+    assert "loadAllowedProjects" in js
+    assert "crypto.randomUUID" in js
+    assert "idempotency" in js
+
+
+def test_frontend_js_reuses_idempotency_key_on_retry():
+    """The UI retains and reuses one idempotency key for a normalized intent."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "getBuildKey" in js
+    assert "normalizeBuildIntent" in js
+    assert "buildKeyIntent" in js
+    # The key is reused when the normalized intent is unchanged.
+    assert "if (buildKey && buildKeyIntent === intent) return buildKey;" in js
+
+
+def test_frontend_js_rotates_key_on_payload_change():
+    """The UI rotates the key when the normalized payload changes."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "rotateBuildKey" in js
+    # A changed intent generates a fresh key.
+    assert "buildKey = crypto.randomUUID();" in js
+
+
+def test_frontend_js_rotates_key_on_confirmed_success():
+    """The UI clears the key after a confirmed success so the next submit is fresh."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "clearBuildKey" in js
+    assert "clearBuildKey();" in js
+
+
+def test_frontend_js_suppresses_concurrent_double_click():
+    """The UI suppresses concurrent double clicks via an in-flight guard."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "buildInFlight" in js
+    assert "if (buildInFlight) return;" in js
+
+
+def test_frontend_js_viewer_disables_form():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "setBuildDisabled(true)" in js
+    assert "viewer" in js
+
+
+def test_frontend_js_build_status_aria():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "build-status" in js
+
+
+def test_frontend_html_build_status_role():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'role="status"' in html
+    assert 'aria-live="polite"' in html
+
+
+# --- Deployment contract: compose.yaml allowlist & secret handling ---
+
+
+def test_compose_supplies_authoritative_allowlist():
+    """The deployment must supply a non-empty authoritative project allowlist."""
+    compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
+    match = re.search(r"AGENT_GATEWAY_ALLOWED_PROJECTS:\s*(\S+)", compose)
+    assert match is not None, "compose.yaml must set AGENT_GATEWAY_ALLOWED_PROJECTS"
+    projects = [p.strip() for p in match.group(1).split(",") if p.strip()]
+    assert projects, "AGENT_GATEWAY_ALLOWED_PROJECTS must be non-empty"
+    assert "firstproject" in projects
+    assert "infrastructure" in projects
+
+
+def test_compose_uses_file_backed_secrets_not_inline():
+    """The gateway key must be a file-backed secret, never an inline env value."""
+    compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
+    # The key is referenced as a named secret (file-backed), not an inline env var.
+    assert "agent_gateway_key" in compose
+    assert "AGENT_GATEWAY_KEY:" not in compose
+    # The internal gateway URL is the docker-internal host, not a public endpoint.
+    assert "host.docker.internal" in compose

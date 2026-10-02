@@ -24,6 +24,7 @@ PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboar
 USERS_FILE = Path(os.getenv("DASHBOARD_USERS_FILE", "/run/secrets/dashboard_users"))
 AUDIT_LOG_FILE = Path(os.getenv("DASHBOARD_AUDIT_LOG_FILE", "/tmp/local-ai-dashboard-audit.jsonl"))
 USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
+ALLOWED_PROJECTS = [p.strip() for p in os.getenv("AGENT_GATEWAY_ALLOWED_PROJECTS", "").split(",") if p.strip()]
 WORKFLOW_ACTIONS = {"retry", "rereview", "approve", "merge", "push", "cleanup"}
 ACTION_ROLES = {
     "retry": {"operator", "admin"},
@@ -33,8 +34,16 @@ ACTION_ROLES = {
     "push": {"admin"},
     "cleanup": {"admin"},
 }
+BUILD_ROLES = {"operator", "admin"}
 VALID_ROLES = {"viewer", "operator", "admin"}
 _audit_lock = threading.Lock()
+
+
+class StartWorkflowRequest(BaseModel):
+    project: str
+    objective: str
+    reasoning: str = "standard"
+    idempotency_key: str
 
 app = FastAPI(title="Local AI Operations")
 security = HTTPBasic()
@@ -96,6 +105,14 @@ def _audit(request: Request, workflow_id: str, action: str, outcome: str) -> Non
         os.fsync(stream.fileno())
 
 
+def _read_gateway_key() -> str:
+    """Read the gateway bearer key, returning a controlled redacted 502 if absent/unreadable."""
+    try:
+        return GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        raise HTTPException(status_code=502, detail="Gateway credential unavailable")
+
+
 @app.middleware("http")
 async def require_authentication(request: Request, call_next):
     if request.url.path == "/health":
@@ -122,7 +139,7 @@ async def session(request: Request):
 
 @app.get("/api/dashboard")
 async def dashboard():
-    key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    key = _read_gateway_key()
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.get(
             f"{GATEWAY_URL}/v1/dashboard",
@@ -184,11 +201,16 @@ def _project_workflow(raw: dict) -> dict:
     return result
 
 
+@app.get("/api/workflows/allowed-projects")
+async def allowed_projects():
+    return {"projects": ALLOWED_PROJECTS}
+
+
 @app.get("/api/workflows/{workflow_id}")
 async def workflow_detail(workflow_id: str):
     if re.fullmatch(r"[0-9a-f]{10}", workflow_id) is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
-    key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    key = _read_gateway_key()
     async with httpx.AsyncClient(timeout=10) as client:
         try:
             response = await client.get(
@@ -237,7 +259,7 @@ async def workflow_action(
 
     _audit(request, workflow_id, action, "attempted")
 
-    key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    key = _read_gateway_key()
     async with httpx.AsyncClient(timeout=60) as client:
         try:
             response = await client.post(
@@ -260,6 +282,99 @@ async def workflow_action(
         raise HTTPException(status_code=502, detail="Upstream gateway error")
     _audit(request, workflow_id, action, "succeeded")
     return {"ok": True, "action": action}
+
+
+@app.post("/api/workflows")
+async def start_workflow(payload: StartWorkflowRequest, request: Request):
+    if request.state.role not in BUILD_ROLES:
+        _audit(request, "", "start_build", "denied")
+        raise HTTPException(status_code=403, detail="Build actions require operator or admin access")
+
+    project = payload.project.strip()
+    objective = payload.objective.strip()
+    reasoning = payload.reasoning
+    idempotency_key = payload.idempotency_key.strip()
+
+    if not project:
+        raise HTTPException(status_code=400, detail="Project is required")
+    if not objective:
+        raise HTTPException(status_code=400, detail="Objective is required")
+    if len(objective) > 2000:
+        raise HTTPException(status_code=400, detail="Objective must be 2000 characters or fewer")
+    if any(ord(c) < 32 for c in objective):
+        raise HTTPException(status_code=400, detail="Objective contains invalid control characters")
+    if reasoning not in ("standard", "deep"):
+        raise HTTPException(status_code=400, detail="Reasoning must be 'standard' or 'deep'")
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", idempotency_key):
+        raise HTTPException(status_code=400, detail="Idempotency key must be a valid UUID-shaped value")
+    if project not in ALLOWED_PROJECTS:
+        raise HTTPException(status_code=400, detail="Project is not in the allowed list")
+
+    _audit(request, "", "start_build", "attempted")
+
+    key = _read_gateway_key()
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await client.post(
+                f"{GATEWAY_URL}/v1/workflows",
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Idempotency-Key": idempotency_key,
+                },
+                json={
+                    "project": project,
+                    "objective": objective,
+                    "reasoning": reasoning == "deep",
+                },
+            )
+        except httpx.HTTPError:
+            _audit(request, "", "start_build", "upstream_unavailable")
+            raise HTTPException(status_code=502, detail="Upstream gateway unavailable")
+
+    if response.status_code in (200, 202):
+        try:
+            data = response.json()
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            _audit(request, "", "start_build", "upstream_failed")
+            raise HTTPException(status_code=502, detail="Invalid upstream response")
+        workflow_id = data.get("workflow_id")
+        overall = data.get("overall")
+        status = data.get("status")
+        if status == "processing" or overall == "processing":
+            _audit(request, workflow_id if isinstance(workflow_id, str) else "", "start_build", "processing")
+            return {
+                "id": workflow_id if isinstance(workflow_id, str) and re.fullmatch(r"[0-9a-f]{10}", workflow_id) else None,
+                "status": "processing",
+                "pending": True,
+                "project": project,
+                "objective": objective,
+                "reasoning": reasoning,
+            }
+        if not isinstance(workflow_id, str) or re.fullmatch(r"[0-9a-f]{10}", workflow_id) is None:
+            _audit(request, "", "start_build", "upstream_failed")
+            raise HTTPException(status_code=502, detail="Invalid upstream response")
+        if not isinstance(overall, str) or not overall:
+            _audit(request, "", "start_build", "upstream_failed")
+            raise HTTPException(status_code=502, detail="Invalid upstream response")
+        _audit(request, workflow_id, "start_build", "succeeded")
+        return {
+            "id": workflow_id,
+            "status": overall,
+            "pending": False,
+            "project": project,
+            "objective": objective,
+            "reasoning": reasoning,
+        }
+    if response.status_code == 401:
+        _audit(request, "", "start_build", "gateway_auth_failed")
+        raise HTTPException(status_code=502, detail="Gateway authorization failed")
+    if response.status_code == 409:
+        _audit(request, "", "start_build", "duplicate")
+        raise HTTPException(status_code=409, detail="A workflow with this idempotency key already exists")
+    _audit(request, "", "start_build", "upstream_failed")
+    raise HTTPException(status_code=502, detail="Upstream gateway error")
 
 
 @app.get("/health")

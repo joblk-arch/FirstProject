@@ -6,6 +6,9 @@ const dialog = $('workflow-dialog');
 const workflowContent = $('workflow-content');
 let activeWorkflowId = null;
 let sessionIdentity = {username:'',role:'viewer'};
+let buildKey = null;
+let buildKeyIntent = null;
+let buildInFlight = false;
 
 function render(data) {
   const jobs = data.jobs || [], usage = data.usage || [], counts = data.counts || [];
@@ -112,6 +115,117 @@ async function runWorkflowAction(action) {
   }
 }
 
+async function loadAllowedProjects() {
+  try {
+    const response = await fetch('/api/workflows/allowed-projects', {cache: 'no-store'});
+    if (!response.ok) return;
+    const data = await response.json();
+    const select = $('build-project');
+    select.innerHTML = (data.projects || []).map((p) => `<option value="${safe(p)}">${safe(p)}</option>`).join('');
+  } catch { /* non-critical */ }
+}
+
+function setBuildStatus(message, isError) {
+  const el = $('build-status');
+  el.textContent = message;
+  el.className = 'build-status' + (isError ? ' build-status-error' : '');
+}
+
+function setBuildDisabled(disabled) {
+  $('build-submit').disabled = disabled;
+  $('build-project').disabled = disabled;
+  $('build-objective').disabled = disabled;
+  document.querySelectorAll('#start-build-form input[type="radio"]').forEach((r) => { r.disabled = disabled; });
+}
+
+function normalizeBuildIntent(project, objective, reasoning) {
+  return `${project}\u0000${objective}\u0000${reasoning}`;
+}
+
+function getBuildKey(project, objective, reasoning) {
+  const intent = normalizeBuildIntent(project, objective, reasoning);
+  if (buildKey && buildKeyIntent === intent) return buildKey;
+  buildKeyIntent = intent;
+  buildKey = crypto.randomUUID();
+  return buildKey;
+}
+
+function rotateBuildKey(project, objective, reasoning) {
+  const intent = normalizeBuildIntent(project, objective, reasoning);
+  buildKeyIntent = intent;
+  buildKey = crypto.randomUUID();
+}
+
+function clearBuildKey() {
+  buildKey = null;
+  buildKeyIntent = null;
+}
+
+async function startBuild(event) {
+  event.preventDefault();
+  if (buildInFlight) return;
+  const project = $('build-project').value;
+  const objective = $('build-objective').value.trim();
+  const reasoning = document.querySelector('input[name="reasoning"]:checked')?.value || 'standard';
+
+  if (!project || !objective) {
+    setBuildStatus('Please select a project and enter an objective.', true);
+    return;
+  }
+
+  const idempotencyKey = getBuildKey(project, objective, reasoning);
+  buildInFlight = true;
+  setBuildDisabled(true);
+  setBuildStatus('Submitting…');
+
+  try {
+    const response = await fetch('/api/workflows', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({project, objective, reasoning, idempotency_key: idempotencyKey}),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 409) {
+        rotateBuildKey(project, objective, reasoning);
+        setBuildStatus('Duplicate submission detected. Please try again.', true);
+      } else if (response.status === 403) {
+        setBuildStatus(result.detail || 'You do not have permission to start builds.', true);
+      } else if (response.status === 502) {
+        setBuildStatus(result.detail || 'Gateway unavailable. Please try again.', true);
+      } else {
+        setBuildStatus(result.detail || `Submission failed (${response.status}).`, true);
+      }
+      setBuildDisabled(false);
+      buildInFlight = false;
+      return;
+    }
+    if (result.pending) {
+      setBuildStatus(`Workflow ${result.id || ''} is processing. You can retry.`, false);
+      setBuildDisabled(false);
+      buildInFlight = false;
+      return;
+    }
+    setBuildStatus(`Workflow ${result.id || ''} started (${result.status || 'queued'}).`);
+    $('build-objective').value = '';
+    $('build-char-count').textContent = '0/2000';
+    clearBuildKey();
+    setBuildDisabled(false);
+    buildInFlight = false;
+    await load();
+    if (result.id) openWorkflow(result.id);
+  } catch {
+    setBuildStatus('Network error. Please try again.', true);
+    setBuildDisabled(false);
+    buildInFlight = false;
+  }
+}
+
+$('build-objective').addEventListener('input', (e) => {
+  $('build-char-count').textContent = `${e.target.value.length}/2000`;
+});
+$('start-build-form').addEventListener('submit', startBuild);
+
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
   catch(error) { $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
@@ -122,6 +236,18 @@ async function loadSession() {
   if (!response.ok) throw new Error(`Session returned ${response.status}`);
   sessionIdentity = await response.json();
   $('identity').textContent = `${sessionIdentity.username} · ${sessionIdentity.role}`;
+  if (sessionIdentity.role === 'viewer') {
+    setBuildDisabled(true);
+    $('build-permission-hint').textContent = 'Operator or admin required';
+    const note = document.createElement('p');
+    note.className = 'permission-note';
+    note.textContent = 'Build actions require operator or admin access.';
+    const form = $('start-build-form');
+    if (form && !form.querySelector('.permission-note')) form.appendChild(note);
+  } else {
+    setBuildDisabled(false);
+    $('build-permission-hint').textContent = '';
+  }
 }
 
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
@@ -130,5 +256,5 @@ workflowContent.addEventListener('click',(event)=>{const retry=event.target.clos
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
 $('refresh').addEventListener('click',load);
-async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await load();setInterval(load,15000);}
+async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await loadAllowedProjects();await load();setInterval(load,15000);}
 initialize();

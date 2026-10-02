@@ -21,6 +21,30 @@
     </section>
     <section class="metrics" id="metrics" aria-label="Key metrics"></section>
     <div class="grid">
+      <section class="panel span-2" id="start-build-panel">
+        <div class="panel-head"><div><p class="eyebrow">START BUILD</p><h2>Launch a new workflow</h2></div><span class="hint" id="build-permission-hint"></span></div>
+        <form id="start-build-form" novalidate>
+          <div class="build-form-grid">
+            <div class="build-field">
+              <label for="build-project">Project</label>
+              <select id="build-project" required></select>
+            </div>
+            <div class="build-field">
+              <label for="build-objective">Objective <span class="char-count" id="build-char-count">0/2000</span></label>
+              <textarea id="build-objective" required maxlength="2000" rows="3" placeholder="Describe what to build…"></textarea>
+            </div>
+            <fieldset class="build-field build-reasoning">
+              <legend>Reasoning depth</legend>
+              <label><input type="radio" name="reasoning" value="standard" checked> Standard</label>
+              <label><input type="radio" name="reasoning" value="deep"> Deep</label>
+            </fieldset>
+          </div>
+          <div class="build-form-footer">
+            <button type="submit" id="build-submit">Start Build</button>
+            <p id="build-status" class="build-status" role="status" aria-live="polite"></p>
+          </div>
+        </form>
+      </section>
       <section class="panel span-2">
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></div>
         <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>
