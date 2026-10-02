@@ -131,10 +131,46 @@ function setBuildStatus(message, isError) {
   el.className = 'build-status' + (isError ? ' build-status-error' : '');
 }
 
+const SPEC_FIELDS = ['spec-goal', 'spec-acceptance', 'spec-scope', 'spec-exclusions', 'spec-required-tests', 'spec-notes'];
+
+function composeObjective() {
+  const parts = [];
+  const goal = $('spec-goal').value.trim();
+  const acceptance = $('spec-acceptance').value.trim();
+  const scope = $('spec-scope').value.trim();
+  const exclusions = $('spec-exclusions').value.trim();
+  const requiredTests = $('spec-required-tests').value.trim();
+  const notes = $('spec-notes').value.trim();
+  if (goal) parts.push(`Goal: ${goal}`);
+  if (acceptance) parts.push(`Acceptance Criteria: ${acceptance}`);
+  if (scope) parts.push(`Scope: ${scope}`);
+  if (exclusions) parts.push(`Exclusions: ${exclusions}`);
+  if (requiredTests) parts.push(`Required Tests: ${requiredTests}`);
+  if (notes) parts.push(`Notes: ${notes}`);
+  return parts.join(' | ');
+}
+
+function updatePreview() {
+  const objective = composeObjective();
+  $('build-preview-text').textContent = objective;
+  const len = objective.length;
+  $('build-char-count').textContent = `${len}/2000`;
+  const overLimit = len > 2000;
+  $('build-preview').classList.toggle('over-limit', overLimit);
+  if (overLimit) {
+    $('build-submit').disabled = true;
+  } else if (sessionIdentity.role !== 'viewer') {
+    $('build-submit').disabled = false;
+  }
+}
+
 function setBuildDisabled(disabled) {
   $('build-submit').disabled = disabled;
   $('build-project').disabled = disabled;
-  $('build-objective').disabled = disabled;
+  SPEC_FIELDS.forEach((id) => { $(id).disabled = disabled; });
+  $('template-select').disabled = disabled;
+  $('template-save').disabled = disabled;
+  $('template-delete').disabled = disabled;
   document.querySelectorAll('#start-build-form input[type="radio"]').forEach((r) => { r.disabled = disabled; });
 }
 
@@ -183,7 +219,7 @@ async function startBuild(event) {
   event.preventDefault();
   if (buildInFlight) return;
   const project = $('build-project').value;
-  const objective = $('build-objective').value.trim();
+  const objective = composeObjective();
   const reasoning = document.querySelector('input[name="reasoning"]:checked')?.value || 'standard';
 
   if (!project || !objective) {
@@ -225,8 +261,8 @@ async function startBuild(event) {
       return;
     }
     setBuildStatus(`Workflow ${result.id || ''} started (${result.status || 'queued'}).`);
-    $('build-objective').value = '';
-    $('build-char-count').textContent = '0/2000';
+    SPEC_FIELDS.forEach((id) => { $(id).value = ''; });
+    updatePreview();
     clearBuildKey();
     setBuildDisabled(false);
     buildInFlight = false;
@@ -239,10 +275,106 @@ async function startBuild(event) {
   }
 }
 
-$('build-objective').addEventListener('input', (e) => {
-  $('build-char-count').textContent = `${e.target.value.length}/2000`;
-});
+SPEC_FIELDS.forEach((id) => { $(id).addEventListener('input', updatePreview); });
 $('start-build-form').addEventListener('submit', startBuild);
+
+async function loadTemplates(project) {
+  const select = $('template-select');
+  select.innerHTML = '<option value="">— No template —</option>';
+  $('template-delete').disabled = true;
+  if (!project) return;
+  try {
+    const response = await fetch(`/api/templates?project=${encodeURIComponent(project)}`, {cache: 'no-store'});
+    if (!response.ok) return;
+    const data = await response.json();
+    const templates = data.templates || [];
+    templates.forEach((t) => {
+      const opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = t.name;
+      select.appendChild(opt);
+    });
+  } catch { /* non-critical */ }
+}
+
+function applyTemplate(templateId) {
+  if (!templateId) return;
+  const select = $('template-select');
+  const project = $('build-project').value;
+  fetch(`/api/templates?project=${encodeURIComponent(project)}`, {cache: 'no-store'})
+    .then((r) => r.ok ? r.json() : null)
+    .then((data) => {
+      if (!data) return;
+      const t = (data.templates || []).find((x) => x.id === templateId);
+      if (!t) return;
+      $('spec-goal').value = t.spec.goal || '';
+      $('spec-acceptance').value = t.spec.acceptance || '';
+      $('spec-scope').value = t.spec.scope || '';
+      $('spec-exclusions').value = t.spec.exclusions || '';
+      $('spec-required-tests').value = t.spec.required_tests || '';
+      $('spec-notes').value = t.spec.notes || '';
+      $('template-delete').disabled = false;
+      updatePreview();
+    })
+    .catch(() => {});
+}
+
+async function saveTemplate() {
+  const project = $('build-project').value;
+  if (!project) { setBuildStatus('Select a project first.', true); return; }
+  const name = window.prompt('Template name:');
+  if (!name || !name.trim()) return;
+  const body = {
+    project,
+    name: name.trim().slice(0, 100),
+    spec: {
+      goal: $('spec-goal').value.trim(),
+      acceptance: $('spec-acceptance').value.trim(),
+      scope: $('spec-scope').value.trim(),
+      exclusions: $('spec-exclusions').value.trim(),
+      required_tests: $('spec-required-tests').value.trim(),
+      notes: $('spec-notes').value.trim(),
+    },
+  };
+  try {
+    const response = await fetch('/api/templates', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      setBuildStatus(result.detail || 'Failed to save template.', true);
+      return;
+    }
+    setBuildStatus('Template saved.');
+    await loadTemplates(project);
+  } catch (error) {
+    setBuildStatus(error.message || 'Failed to save template.', true);
+  }
+}
+
+async function deleteTemplate() {
+  const select = $('template-select');
+  const id = select.value;
+  if (!id) return;
+  const project = $('build-project').value;
+  if (!project) return;
+  if (!window.confirm('Delete this template?')) return;
+  try {
+    const response = await fetch(`/api/templates/${encodeURIComponent(id)}?project=${encodeURIComponent(project)}`, {method: 'DELETE'});
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      setBuildStatus(result.detail || 'Failed to delete template.', true);
+      return;
+    }
+    setBuildStatus('Template deleted.');
+    await loadTemplates($('build-project').value);
+  } catch (error) {
+    setBuildStatus(error.message || 'Failed to delete template.', true);
+  }
+}
+
+$('template-select').addEventListener('change', (e) => { applyTemplate(e.target.value); });
+$('template-save').addEventListener('click', saveTemplate);
+$('template-delete').addEventListener('click', deleteTemplate);
+$('build-project').addEventListener('change', () => { loadTemplates($('build-project').value); });
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
@@ -274,5 +406,5 @@ workflowContent.addEventListener('click',(event)=>{const retry=event.target.clos
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
 $('refresh').addEventListener('click',load);
-async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await loadAllowedProjects();await load();setInterval(load,15000);}
+async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await loadAllowedProjects();if(sessionIdentity.role!=='viewer'){await loadTemplates($('build-project').value);}await load();setInterval(load,15000);}
 initialize();

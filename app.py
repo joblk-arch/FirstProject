@@ -23,6 +23,7 @@ GATEWAY_KEY_FILE = Path(os.getenv("AGENT_GATEWAY_KEY_FILE", "/run/secrets/agent_
 PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboard_password"))
 USERS_FILE = Path(os.getenv("DASHBOARD_USERS_FILE", "/run/secrets/dashboard_users"))
 AUDIT_LOG_FILE = Path(os.getenv("DASHBOARD_AUDIT_LOG_FILE", "/tmp/local-ai-dashboard-audit.jsonl"))
+TEMPLATES_FILE = Path(os.getenv("DASHBOARD_TEMPLATES_FILE", "/data/templates.json"))
 USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 ALLOWED_PROJECTS = [p.strip() for p in os.getenv("AGENT_GATEWAY_ALLOWED_PROJECTS", "").split(",") if p.strip()]
 WORKFLOW_ACTIONS = {"retry", "rereview", "approve", "merge", "push", "cleanup"}
@@ -37,6 +38,7 @@ ACTION_ROLES = {
 BUILD_ROLES = {"operator", "admin"}
 VALID_ROLES = {"viewer", "operator", "admin"}
 _audit_lock = threading.Lock()
+_templates_lock = threading.Lock()
 
 
 class StartWorkflowRequest(BaseModel):
@@ -44,6 +46,31 @@ class StartWorkflowRequest(BaseModel):
     objective: str
     reasoning: str = "standard"
     idempotency_key: str
+
+
+class TemplateSpec(BaseModel):
+    goal: str
+    acceptance: str
+    scope: str = ""
+    exclusions: str = ""
+    required_tests: str = ""
+    notes: str = ""
+
+
+class Template(BaseModel):
+    id: str
+    project: str
+    name: str
+    spec: TemplateSpec
+    created_at: str
+    updated_at: str
+
+
+class CreateTemplateRequest(BaseModel):
+    project: str
+    name: str
+    spec: TemplateSpec
+
 
 app = FastAPI(title="Local AI Operations")
 security = HTTPBasic()
@@ -375,6 +402,109 @@ async def start_workflow(payload: StartWorkflowRequest, request: Request):
         raise HTTPException(status_code=409, detail="A workflow with this idempotency key already exists")
     _audit(request, "", "start_build", "upstream_failed")
     raise HTTPException(status_code=502, detail="Upstream gateway error")
+
+
+def _validate_template_text(value: str, field_name: str, min_len: int = 0, max_len: int = 2000) -> str:
+    if len(value) < min_len:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be at least {min_len} characters")
+    if len(value) > max_len:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be at most {max_len} characters")
+    if any(ord(c) < 32 for c in value):
+        raise HTTPException(status_code=400, detail=f"{field_name} contains invalid control characters")
+    return value
+
+
+def _load_templates() -> list:
+    try:
+        data = json.loads(TEMPLATES_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    templates = data.get("templates") if isinstance(data, dict) else None
+    return templates if isinstance(templates, list) else []
+
+
+def _save_templates(templates: list) -> None:
+    TEMPLATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = TEMPLATES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"templates": templates}, indent=2), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TEMPLATES_FILE)
+
+
+@app.get("/api/templates")
+async def list_templates(project: str, request: Request):
+    if request.state.role not in BUILD_ROLES:
+        raise HTTPException(status_code=403, detail="Template management requires operator or admin access")
+    if project not in ALLOWED_PROJECTS:
+        raise HTTPException(status_code=400, detail="Project is not in the allowed list")
+    with _templates_lock:
+        templates = _load_templates()
+    result = [t for t in templates if isinstance(t, dict) and t.get("project") == project]
+    return {"templates": result}
+
+
+@app.post("/api/templates")
+async def create_template(payload: CreateTemplateRequest, request: Request):
+    if request.state.role not in BUILD_ROLES:
+        raise HTTPException(status_code=403, detail="Template management requires operator or admin access")
+
+    project = payload.project.strip()
+    name = payload.name.strip()
+
+    if not project:
+        raise HTTPException(status_code=400, detail="Project is required")
+    if project not in ALLOWED_PROJECTS:
+        raise HTTPException(status_code=400, detail="Project is not in the allowed list")
+    if not name or len(name) > 100:
+        raise HTTPException(status_code=400, detail="Name must be 1-100 characters")
+    if any(ord(c) < 32 for c in name):
+        raise HTTPException(status_code=400, detail="Name contains invalid control characters")
+
+    _validate_template_text(payload.spec.goal, "Goal", min_len=1)
+    _validate_template_text(payload.spec.acceptance, "Acceptance Criteria", min_len=1)
+    _validate_template_text(payload.spec.scope, "Scope")
+    _validate_template_text(payload.spec.exclusions, "Exclusions")
+    _validate_template_text(payload.spec.required_tests, "Required Tests")
+    _validate_template_text(payload.spec.notes, "Notes")
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    with _templates_lock:
+        templates = _load_templates()
+        template_id = uuid.uuid4().hex
+        template = {
+            "id": template_id,
+            "project": project,
+            "name": name,
+            "spec": payload.spec.model_dump(),
+            "created_at": now,
+            "updated_at": now,
+        }
+        templates.append(template)
+        _save_templates(templates)
+        return template
+
+
+@app.delete("/api/templates/{template_id}")
+async def delete_template(template_id: str, project: str, request: Request):
+    if request.state.role not in BUILD_ROLES:
+        raise HTTPException(status_code=403, detail="Template management requires operator or admin access")
+
+    if project not in ALLOWED_PROJECTS:
+        raise HTTPException(status_code=400, detail="Project is not in the allowed list")
+
+    if not re.fullmatch(r"[0-9a-f]{32}", template_id):
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    with _templates_lock:
+        templates = _load_templates()
+        before = len(templates)
+        templates = [t for t in templates if not (isinstance(t, dict) and t.get("id") == template_id and t.get("project") == project)]
+        if len(templates) == before:
+            raise HTTPException(status_code=404, detail="Template not found")
+        _save_templates(templates)
+
+    return {"ok": True}
 
 
 @app.get("/health")

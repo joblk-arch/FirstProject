@@ -29,15 +29,49 @@
               <label for="build-project">Project</label>
               <select id="build-project" required></select>
             </div>
-            <div class="build-field">
-              <label for="build-objective">Objective <span class="char-count" id="build-char-count">0/2000</span></label>
-              <textarea id="build-objective" required maxlength="2000" rows="3" placeholder="Describe what to build…"></textarea>
-            </div>
             <fieldset class="build-field build-reasoning">
               <legend>Reasoning depth</legend>
               <label><input type="radio" name="reasoning" value="standard" checked> Standard</label>
               <label><input type="radio" name="reasoning" value="deep"> Deep</label>
             </fieldset>
+          </div>
+          <div class="build-spec-grid">
+            <div class="build-field">
+              <label for="spec-goal">Goal <span class="required-mark">*</span></label>
+              <textarea id="spec-goal" required rows="2" maxlength="2000" placeholder="What should the agent accomplish?"></textarea>
+            </div>
+            <div class="build-field">
+              <label for="spec-acceptance">Acceptance Criteria <span class="required-mark">*</span></label>
+              <textarea id="spec-acceptance" required rows="3" maxlength="2000" placeholder="How will you know it's done?"></textarea>
+            </div>
+            <div class="build-field">
+              <label for="spec-scope">Scope</label>
+              <textarea id="spec-scope" rows="2" maxlength="2000" placeholder="What is in scope?"></textarea>
+            </div>
+            <div class="build-field">
+              <label for="spec-exclusions">Exclusions</label>
+              <textarea id="spec-exclusions" rows="2" maxlength="2000" placeholder="What should the agent NOT do?"></textarea>
+            </div>
+            <div class="build-field">
+              <label for="spec-required-tests">Required Tests</label>
+              <textarea id="spec-required-tests" rows="2" maxlength="2000" placeholder="What tests must pass?"></textarea>
+            </div>
+            <div class="build-field">
+              <label for="spec-notes">Notes</label>
+              <textarea id="spec-notes" rows="2" maxlength="2000" placeholder="Additional context for the agent."></textarea>
+            </div>
+          </div>
+          <div class="build-preview" id="build-preview" aria-live="polite">
+            <p class="eyebrow">OBJECTIVE PREVIEW</p>
+            <pre id="build-preview-text" class="preview-text"></pre>
+            <span class="char-count" id="build-char-count">0/2000</span>
+          </div>
+          <div class="build-template-bar">
+            <select id="template-select" aria-label="Load template">
+              <option value="">— No template —</option>
+            </select>
+            <button type="button" id="template-save">Save as template</button>
+            <button type="button" id="template-delete" disabled>Delete template</button>
           </div>
           <div class="build-form-footer">
             <button type="submit" id="build-submit">Start Build</button>

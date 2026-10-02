@@ -1215,10 +1215,21 @@ def test_frontend_html_has_start_build_form():
     html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="start-build-form"' in html
     assert 'id="build-project"' in html
-    assert 'id="build-objective"' in html
+    assert 'id="spec-goal"' in html
+    assert 'id="spec-acceptance"' in html
+    assert 'id="spec-scope"' in html
+    assert 'id="spec-exclusions"' in html
+    assert 'id="spec-required-tests"' in html
+    assert 'id="spec-notes"' in html
+    assert 'id="build-preview"' in html
+    assert 'id="build-preview-text"' in html
+    assert 'id="build-char-count"' in html
+    assert 'id="template-select"' in html
+    assert 'id="template-save"' in html
+    assert 'id="template-delete"' in html
     assert 'id="build-submit"' in html
     assert 'id="build-status"' in html
-    assert 'id="build-char-count"' in html
+    assert 'id="build-objective"' not in html
 
 
 def test_frontend_js_has_start_build_functions():
@@ -1896,3 +1907,507 @@ def test_compose_uses_file_backed_secrets_not_inline():
     assert "AGENT_GATEWAY_KEY:" not in compose
     # The internal gateway URL is the docker-internal host, not a public endpoint.
     assert "host.docker.internal" in compose
+
+
+# --- Template API: fixtures and helpers ---
+
+
+@pytest.fixture
+def templates_file(tmp_path: Path) -> Path:
+    tf = tmp_path / "templates.json"
+    tf.write_text(app.json.dumps({"templates": []}), encoding="utf-8")
+    return tf
+
+
+def _make_multi_role_users_file(tmp_path: Path) -> Path:
+    users_file = tmp_path / "users.json"
+    users_file.write_text(
+        app.json.dumps({
+            "reader": _user_record("viewer-pass", "viewer"),
+            "op": _user_record("operator-pass", "operator"),
+            "admin": _user_record("admin-pass", "admin"),
+        }),
+        encoding="utf-8",
+    )
+    return users_file
+
+
+def _viewer_auth():
+    return {"Authorization": _basic_auth("reader", "viewer-pass")}
+
+
+def _operator_auth():
+    return {"Authorization": _basic_auth("op", "operator-pass")}
+
+
+def _admin_auth():
+    return {"Authorization": _basic_auth("admin", "admin-pass")}
+
+
+def _template_body(project="firstproject", name="My Template", **spec_overrides):
+    spec = {
+        "goal": "Build feature X",
+        "acceptance": "Tests pass",
+        "scope": "Module A",
+        "exclusions": "Module B",
+        "required_tests": "pytest",
+        "notes": "Use TDD",
+    }
+    spec.update(spec_overrides)
+    return {"project": project, "name": name, "spec": spec}
+
+
+def _seed_template(templates_file: Path, project="firstproject", name="Seeded", template_id=None):
+    import uuid as _uuid
+    if template_id is None:
+        template_id = _uuid.uuid4().hex
+    now = "2025-01-15T10:00:00+00:00"
+    data = app.json.loads(templates_file.read_text(encoding="utf-8"))
+    data["templates"].append({
+        "id": template_id,
+        "project": project,
+        "name": name,
+        "spec": {
+            "goal": "Seeded goal",
+            "acceptance": "Seeded acceptance",
+            "scope": "",
+            "exclusions": "",
+            "required_tests": "",
+            "notes": "",
+        },
+        "created_at": now,
+        "updated_at": now,
+    })
+    templates_file.write_text(app.json.dumps({"templates": data["templates"]}, indent=2), encoding="utf-8")
+    return template_id
+
+
+# --- Template API: GET /api/templates ---
+
+
+def test_list_templates_admin_success(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    _seed_template(templates_file, project="firstproject", name="Alpha")
+    _seed_template(templates_file, project="firstproject", name="Beta")
+    _seed_template(templates_file, project="secondproject", name="Gamma")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject", "secondproject"]):
+        response = TestClient(app.app).get(
+            "/api/templates?project=firstproject", headers=_admin_auth()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["templates"]) == 2
+    names = {t["name"] for t in data["templates"]}
+    assert names == {"Alpha", "Beta"}
+
+
+def test_list_templates_operator_success(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    _seed_template(templates_file, project="firstproject", name="Alpha")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).get(
+            "/api/templates?project=firstproject", headers=_operator_auth()
+        )
+    assert response.status_code == 200
+    assert len(response.json()["templates"]) == 1
+
+
+def test_list_templates_viewer_403(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).get(
+            "/api/templates?project=firstproject", headers=_viewer_auth()
+        )
+    assert response.status_code == 403
+    assert "operator" in response.json()["detail"]
+
+
+def test_list_templates_disallowed_project(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).get(
+            "/api/templates?project=evil-project", headers=_admin_auth()
+        )
+    assert response.status_code == 400
+    assert "not in the allowed list" in response.json()["detail"]
+
+
+def test_list_templates_project_isolation(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    _seed_template(templates_file, project="firstproject", name="Alpha")
+    _seed_template(templates_file, project="secondproject", name="Beta")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject", "secondproject"]):
+        response = TestClient(app.app).get(
+            "/api/templates?project=secondproject", headers=_admin_auth()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["templates"]) == 1
+    assert data["templates"][0]["name"] == "Beta"
+    assert data["templates"][0]["project"] == "secondproject"
+
+
+# --- Template API: POST /api/templates ---
+
+
+def test_create_template_admin_success(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(), json=_template_body()
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["project"] == "firstproject"
+    assert data["name"] == "My Template"
+    assert data["spec"]["goal"] == "Build feature X"
+    assert data["spec"]["acceptance"] == "Tests pass"
+    assert len(data["id"]) == 32
+    assert data["created_at"] == data["updated_at"]
+
+
+def test_create_template_operator_success(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_operator_auth(), json=_template_body()
+        )
+    assert response.status_code == 200
+
+
+def test_create_template_viewer_403(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_viewer_auth(), json=_template_body()
+        )
+    assert response.status_code == 403
+    assert "operator" in response.json()["detail"]
+
+
+def test_create_template_disallowed_project(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(project="evil-project")
+        )
+    assert response.status_code == 400
+    assert "not in the allowed list" in response.json()["detail"]
+
+
+def test_create_template_blank_name(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(name="   ")
+        )
+    assert response.status_code == 400
+    assert "Name" in response.json()["detail"]
+
+
+def test_create_template_overlong_name(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(name="a" * 101)
+        )
+    assert response.status_code == 400
+    assert "1-100" in response.json()["detail"]
+
+
+def test_create_template_control_char_name(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(name="bad\nname")
+        )
+    assert response.status_code == 400
+    assert "control" in response.json()["detail"]
+
+
+def test_create_template_blank_goal(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(goal="")
+        )
+    assert response.status_code == 400
+    assert "Goal" in response.json()["detail"]
+
+
+def test_create_template_overlong_goal(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(goal="a" * 2001)
+        )
+    assert response.status_code == 400
+    assert "2000" in response.json()["detail"]
+
+
+def test_create_template_control_char_goal(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(),
+            json=_template_body(goal="bad\ngoal")
+        )
+    assert response.status_code == 400
+    assert "control" in response.json()["detail"]
+
+
+def test_create_template_persisted_shape(tmp_path: Path, templates_file: Path):
+    """The persisted JSON must contain exactly the fixed shape with no extra fields."""
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(), json=_template_body()
+        )
+    assert response.status_code == 200
+    # Read the persisted file and verify the exact shape
+    persisted = app.json.loads(templates_file.read_text(encoding="utf-8"))
+    assert set(persisted.keys()) == {"templates"}
+    assert len(persisted["templates"]) == 1
+    record = persisted["templates"][0]
+    assert set(record.keys()) == {"id", "project", "name", "spec", "created_at", "updated_at"}
+    assert set(record["spec"].keys()) == {"goal", "acceptance", "scope", "exclusions", "required_tests", "notes"}
+    # No secrets, paths, or credentials in the persisted data
+    raw = templates_file.read_text(encoding="utf-8")
+    assert "password" not in raw
+    assert "secret" not in raw
+    assert "/run/secrets" not in raw
+
+
+def test_create_template_mode_0600(tmp_path: Path, templates_file: Path):
+    """The templates file must be written with mode 0600 (owner read/write only)."""
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(), json=_template_body()
+        )
+    assert response.status_code == 200
+    mode = templates_file.stat().st_mode & 0o777
+    assert mode == 0o600, f"Expected mode 0600, got {oct(mode)}"
+
+
+def test_create_template_atomic_write_no_tmp_remains(tmp_path: Path, templates_file: Path):
+    """After a successful write, no .tmp file should remain (atomic os.replace)."""
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).post(
+            "/api/templates", headers=_admin_auth(), json=_template_body()
+        )
+    assert response.status_code == 200
+    tmp_file = templates_file.with_suffix(".tmp")
+    assert not tmp_file.exists(), "A .tmp file must not remain after atomic replace"
+
+
+# --- Template API: DELETE /api/templates/{id} ---
+
+
+def test_delete_template_admin_success(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    tid = _seed_template(templates_file, project="firstproject", name="Alpha")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).delete(
+            f"/api/templates/{tid}?project=firstproject", headers=_admin_auth()
+        )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    # Verify the template was removed from the file
+    persisted = app.json.loads(templates_file.read_text(encoding="utf-8"))
+    assert len(persisted["templates"]) == 0
+
+
+def test_delete_template_operator_success(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    tid = _seed_template(templates_file, project="firstproject", name="Alpha")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).delete(
+            f"/api/templates/{tid}?project=firstproject", headers=_operator_auth()
+        )
+    assert response.status_code == 200
+
+
+def test_delete_template_viewer_403(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    tid = _seed_template(templates_file, project="firstproject", name="Alpha")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).delete(
+            f"/api/templates/{tid}?project=firstproject", headers=_viewer_auth()
+        )
+    assert response.status_code == 403
+    assert "operator" in response.json()["detail"]
+
+
+def test_delete_template_disallowed_project(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    tid = _seed_template(templates_file, project="firstproject", name="Alpha")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).delete(
+            f"/api/templates/{tid}?project=evil-project", headers=_admin_auth()
+        )
+    assert response.status_code == 400
+    assert "not in the allowed list" in response.json()["detail"]
+
+
+def test_delete_template_invalid_id_format(tmp_path: Path, templates_file: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).delete(
+            "/api/templates/not-a-valid-id?project=firstproject", headers=_admin_auth()
+        )
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_delete_template_not_found(tmp_path: Path, templates_file: Path):
+    """A valid-format ID that doesn't match any template returns 404."""
+    users_file = _make_multi_role_users_file(tmp_path)
+    _seed_template(templates_file, project="firstproject", name="Alpha")
+    # Use a valid 32-hex ID that doesn't exist
+    fake_id = "a" * 32
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject"]):
+        response = TestClient(app.app).delete(
+            f"/api/templates/{fake_id}?project=firstproject", headers=_admin_auth()
+        )
+    assert response.status_code == 404
+
+
+def test_delete_template_project_isolation(tmp_path: Path, templates_file: Path):
+    """Deleting with a different project than the template's project must 404."""
+    users_file = _make_multi_role_users_file(tmp_path)
+    tid = _seed_template(templates_file, project="firstproject", name="Alpha")
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "TEMPLATES_FILE", templates_file), \
+         patch.object(app, "ALLOWED_PROJECTS", ["firstproject", "secondproject"]):
+        response = TestClient(app.app).delete(
+            f"/api/templates/{tid}?project=secondproject", headers=_admin_auth()
+        )
+    assert response.status_code == 404
+    # The template must still exist
+    persisted = app.json.loads(templates_file.read_text(encoding="utf-8"))
+    assert len(persisted["templates"]) == 1
+    assert persisted["templates"][0]["id"] == tid
+
+
+# --- Frontend contract: viewer gates and template controls ---
+
+
+def test_frontend_js_viewer_skips_load_templates():
+    """initialize() must gate loadTemplates on role !== 'viewer' to avoid 403 on load."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    # The initialize function must check role before calling loadTemplates
+    assert "sessionIdentity.role!=='viewer'" in js
+    # The role check must guard the loadTemplates call (they appear together in initialize)
+    assert "if(sessionIdentity.role!=='viewer'){await loadTemplates" in js
+
+
+def test_frontend_js_delete_template_includes_project():
+    """deleteTemplate must include the project query parameter in the DELETE URL."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"async function deleteTemplate\(\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "deleteTemplate function not found"
+    body = match.group(0)
+    assert "project" in body
+    assert "encodeURIComponent(project)" in body
+    # The DELETE URL must include the project parameter
+    assert "?project=" in body
+
+
+def test_frontend_js_template_select_disabled_for_viewer():
+    """setBuildDisabled must disable template-select, template-save, and template-delete."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function setBuildDisabled\(disabled\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "setBuildDisabled function not found"
+    body = match.group(0)
+    assert "template-select" in body
+    assert "template-save" in body
+    assert "template-delete" in body
+
+
+def test_frontend_js_objective_preview_compose():
+    """composeObjective must join non-empty spec fields with ' | '."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function composeObjective\(\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "composeObjective function not found"
+    body = match.group(0)
+    assert "parts.join(' | ')" in body
+    assert "Goal:" in body
+    assert "Acceptance Criteria:" in body
+
+
+def test_frontend_js_objective_preview_length_and_limit():
+    """updatePreview must show char count, toggle over-limit, and disable submit >2000."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function updatePreview\(\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "updatePreview function not found"
+    body = match.group(0)
+    assert "build-char-count" in body
+    assert "over-limit" in body
+    assert "build-submit" in body
+    assert "2000" in body
+
+
+def test_frontend_js_viewer_disables_template_controls_on_load():
+    """loadSession must call setBuildDisabled(true) for viewers, which disables template controls."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"async function loadSession\(\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "loadSession function not found"
+    body = match.group(0)
+    assert "viewer" in body
+    assert "setBuildDisabled(true)" in body

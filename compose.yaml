@@ -8,6 +8,7 @@ services:
       DASHBOARD_USERNAME: admin
       DASHBOARD_USERS_FILE: /data/users.json
       DASHBOARD_AUDIT_LOG_FILE: /data/audit.jsonl
+      DASHBOARD_TEMPLATES_FILE: /data/templates.json
     secrets:
       - agent_gateway_key
       - dashboard_password
