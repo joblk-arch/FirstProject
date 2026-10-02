@@ -79,6 +79,13 @@
           </div>
         </form>
       </section>
+      <section class="panel span-2" id="cluster-health-panel" aria-labelledby="cluster-health-title">
+        <div class="panel-head">
+          <div><p class="eyebrow">CLUSTER HEALTH</p><h2 id="cluster-health-title">System status</h2></div>
+          <span class="hint" id="health-timestamp"></span>
+        </div>
+        <div id="cluster-health" class="health-grid" role="status" aria-live="polite"></div>
+      </section>
       <section class="panel span-2">
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></div>
         <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>

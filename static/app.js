@@ -376,6 +376,52 @@ $('template-save').addEventListener('click', saveTemplate);
 $('template-delete').addEventListener('click', deleteTemplate);
 $('build-project').addEventListener('change', () => { loadTemplates($('build-project').value); });
 
+async function loadClusterHealth() {
+  try {
+    const response = await fetch('/api/cluster-health', {cache: 'no-store'});
+    if (!response.ok) throw new Error(`Health check returned ${response.status}`);
+    renderClusterHealth(await response.json());
+  } catch (error) {
+    renderClusterHealthError();
+  }
+}
+
+function renderClusterHealth(data) {
+  const container = $('cluster-health');
+  if (!container) return;
+  const overall = data.overall || 'unknown';
+  const timestamp = data.generated_at ? new Date(data.generated_at).toLocaleTimeString() : '';
+  $('health-timestamp').textContent = timestamp ? `Checked ${timestamp}` : '';
+
+  const services = Array.isArray(data.services) ? data.services : [];
+  const lmStudio = data.lm_studio || {};
+  const agentQueue = data.agent_queue || {};
+
+  const overallBadge = `<div class="health-overall status ${safe(overall)}"><span>${safe(overall)}</span></div>`;
+
+  const serviceCards = services.map((svc) => {
+    const status = svc.status || 'unknown';
+    const latency = svc.latency_ms != null ? `${svc.latency_ms}ms` : '\u2014';
+    const detail = svc.detail ? `<small class="health-detail">${safe(svc.detail)}</small>` : '';
+    return `<article class="health-card"><div class="health-card-head"><span class="status ${safe(status)}">${safe(status)}</span><span class="health-latency">${latency}</span></div><strong>${safe(svc.name)}</strong>${detail}</article>`;
+  }).join('');
+
+  const models = Array.isArray(lmStudio.models) ? lmStudio.models : [];
+  const lmStatus = lmStudio.status || 'unknown';
+  const lmSection = `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status ${safe(lmStatus)}">${safe(lmStatus)}</span><span class="health-latency">LM Studio models</span></div>${models.length ? `<ul class="model-list" aria-label="Loaded models">${models.map((m) => `<li><span class="status ${m.loaded ? 'healthy' : 'unknown'}">${m.loaded ? 'loaded' : 'available'}</span><code>${safe(m.id)}</code></li>`).join('')}</ul>` : '<p class="muted-copy">No models reported.</p>'}</article>`;
+
+  const queueSection = `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status ${agentQueue.running > 0 ? 'running' : 'unknown'}">queue</span><span class="health-latency">${agentQueue.running || 0} running / ${agentQueue.queued || 0} queued</span></div>${agentQueue.current_job ? `<p class="health-current-job">Current: <code>${safe(agentQueue.current_job.id || '\u2014')}</code> \u00b7 ${safe(agentQueue.current_job.project || '\u2014')} \u00b7 ${safe(agentQueue.current_job.stage || '\u2014')}</p>` : '<p class="muted-copy">No active jobs.</p>'}</article>`;
+
+  container.innerHTML = `${overallBadge}<div class="health-cards">${serviceCards}${lmSection}${queueSection}</div>`;
+}
+
+function renderClusterHealthError() {
+  const container = $('cluster-health');
+  if (!container) return;
+  $('health-timestamp').textContent = '';
+  container.innerHTML = `<div class="health-overall status offline"><span>unavailable</span></div><p class="muted-copy">Health check could not be completed.</p>`;
+}
+
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
   catch(error) { $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
@@ -406,5 +452,5 @@ workflowContent.addEventListener('click',(event)=>{const retry=event.target.clos
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
 $('refresh').addEventListener('click',load);
-async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await loadAllowedProjects();if(sessionIdentity.role!=='viewer'){await loadTemplates($('build-project').value);}await load();setInterval(load,15000);}
+async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await loadAllowedProjects();if(sessionIdentity.role!=='viewer'){await loadTemplates($('build-project').value);}await load();await loadClusterHealth();setInterval(load,15000);setInterval(loadClusterHealth,30000);}
 initialize();

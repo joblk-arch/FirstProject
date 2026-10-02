@@ -17,8 +17,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import Response
 
+import asyncio
+import time
+import urllib.parse
+
 
 GATEWAY_URL = os.getenv("AGENT_GATEWAY_URL", "http://host.docker.internal:8765").rstrip("/")
+M5_HOST_URL = os.getenv("M5_HOST_URL", "")
+LMSTUDIO_URL = os.getenv("LMSTUDIO_URL", "")
+TELEGRAM_BOT_URL = os.getenv("TELEGRAM_BOT_URL", "")
+OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "")
+ROUTER_URL = os.getenv("ROUTER_URL", "")
 GATEWAY_KEY_FILE = Path(os.getenv("AGENT_GATEWAY_KEY_FILE", "/run/secrets/agent_gateway_key"))
 PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboard_password"))
 USERS_FILE = Path(os.getenv("DASHBOARD_USERS_FILE", "/run/secrets/dashboard_users"))
@@ -39,6 +48,81 @@ BUILD_ROLES = {"operator", "admin"}
 VALID_ROLES = {"viewer", "operator", "admin"}
 _audit_lock = threading.Lock()
 _templates_lock = threading.Lock()
+
+# --- Cluster Health configuration ---
+
+HEALTH_TIMEOUT = float(os.getenv("HEALTH_CHECK_TIMEOUT", "5"))
+HEALTH_CONCURRENCY = int(os.getenv("HEALTH_CHECK_CONCURRENCY", "8"))
+
+HEALTH_SERVICES: list[dict] = [
+    {"name": "m5-inference", "url_env": "M5_HOST_URL", "check_type": "http"},
+    {"name": "lm-studio", "url_env": "LMSTUDIO_URL", "check_type": "http"},
+    {"name": "agent-gateway", "url_env": "GATEWAY_URL", "check_type": "gateway"},
+    {"name": "dashboard", "url_env": None, "check_type": "self"},
+    {"name": "telegram-bot", "url_env": "TELEGRAM_BOT_URL", "check_type": "http"},
+    {"name": "open-webui", "url_env": "OPENWEBUI_URL", "check_type": "http"},
+    {"name": "router", "url_env": "ROUTER_URL", "check_type": "http"},
+]
+
+# Fixed maximum length for a sanitized LM Studio model identifier. IDs longer
+# than this, or containing characters outside the safe set, are dropped.
+LMSTUDIO_MODEL_ID_MAX = 200
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/._-]*$")
+
+# Fixed maximum number of running jobs surfaced in the agent queue summary.
+# The accurate `running` count is always reported; the list is bounded so a
+# pathological gateway cannot bloat the response.
+MAX_RUNNING_JOBS = 20
+
+
+def _normalize_health_url(url: str) -> str | None:
+    """Normalize an operator-supplied health URL.
+
+    Returns a normalized http/https URL with trailing slashes stripped, or
+    ``None`` if the URL is empty or uses a disallowed scheme. Only ``http`` and
+    ``https`` are permitted; any other scheme (``file://``, ``gopher://``, ...)
+    is rejected so a misconfigured value cannot trigger a non-HTTP request.
+    """
+    if not isinstance(url, str):
+        return None
+    candidate = url.strip().rstrip("/")
+    if not candidate:
+        return None
+    parsed = urllib.parse.urlsplit(candidate)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    return candidate
+
+
+def _sanitize_model_id(raw_id) -> str | None:
+    """Bound and sanitize an LM Studio model identifier.
+
+    Policy: the ID must be a non-empty string of at most
+    ``LMSTUDIO_MODEL_ID_MAX`` characters containing only ``[A-Za-z0-9/._-]``.
+    IDs that fail are dropped (not emitted) so a misconfigured or hostile host
+    cannot surface arbitrary strings in the health payload.
+    """
+    if not isinstance(raw_id, str):
+        return None
+    candidate = raw_id.strip()
+    if not candidate or len(candidate) > LMSTUDIO_MODEL_ID_MAX:
+        return None
+    if _MODEL_ID_RE.fullmatch(candidate) is None:
+        return None
+    return candidate
+
+
+def _service_url(service: dict) -> str:
+    """Resolve a service's configured URL from the current module-level value.
+
+    Reading at call time (rather than baking in at import) keeps the health
+    checks testable: tests can patch the module-level URL variables.
+    """
+    env_name = service.get("url_env")
+    if env_name is None:
+        return ""
+    value = globals().get(env_name, "")
+    return value if isinstance(value, str) else ""
 
 
 class StartWorkflowRequest(BaseModel):
@@ -505,6 +589,294 @@ async def delete_template(template_id: str, project: str, request: Request):
         _save_templates(templates)
 
     return {"ok": True}
+
+
+# --- Cluster Health: check functions ---
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _check_http(name: str, url: str) -> dict:
+    """Check an HTTP service. Returns a fixed-shape health dict."""
+    now = _now_iso()
+    normalized = _normalize_health_url(url)
+    if normalized is None:
+        detail = "unconfigured" if not url else "invalid_url"
+        return {"name": name, "status": "unknown", "latency_ms": None, "last_checked": now, "detail": detail}
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
+            response = await client.get(f"{normalized}/health")
+        latency = int((time.monotonic() - start) * 1000)
+        if 200 <= response.status_code < 300:
+            return {"name": name, "status": "healthy", "latency_ms": latency, "last_checked": now, "detail": None}
+        elif response.status_code == 401:
+            return {"name": name, "status": "degraded", "latency_ms": latency, "last_checked": now, "detail": "auth_failed"}
+        elif response.status_code >= 500:
+            return {"name": name, "status": "degraded", "latency_ms": latency, "last_checked": now, "detail": "http_5xx"}
+        else:
+            return {"name": name, "status": "degraded", "latency_ms": latency, "last_checked": now, "detail": "http_4xx"}
+    except httpx.TimeoutException:
+        return {"name": name, "status": "offline", "latency_ms": None, "last_checked": now, "detail": "timeout"}
+    except httpx.ConnectError:
+        return {"name": name, "status": "offline", "latency_ms": None, "last_checked": now, "detail": "connection_refused"}
+    except httpx.HTTPError:
+        return {"name": name, "status": "offline", "latency_ms": None, "last_checked": now, "detail": "connection_refused"}
+    except Exception:
+        return {"name": name, "status": "unknown", "latency_ms": None, "last_checked": now, "detail": None}
+
+
+async def _check_gateway(name: str) -> tuple[dict, dict | None]:
+    """Check the agent gateway. Returns (health_dict, raw_dashboard_data_or_None)."""
+    now = _now_iso()
+    normalized = _normalize_health_url(GATEWAY_URL)
+    if normalized is None:
+        detail = "unconfigured" if not GATEWAY_URL else "invalid_url"
+        return (
+            {"name": name, "status": "unknown", "latency_ms": None, "last_checked": now, "detail": detail},
+            None,
+        )
+    try:
+        key = GATEWAY_KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return (
+            {"name": name, "status": "degraded", "latency_ms": None, "last_checked": now, "detail": "auth_failed"},
+            None,
+        )
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
+            response = await client.get(
+                f"{normalized}/v1/dashboard",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        latency = int((time.monotonic() - start) * 1000)
+        if 200 <= response.status_code < 300:
+            try:
+                data = response.json()
+            except Exception:
+                data = None
+            return (
+                {"name": name, "status": "healthy", "latency_ms": latency, "last_checked": now, "detail": None},
+                data if isinstance(data, dict) else None,
+            )
+        elif response.status_code == 401:
+            return (
+                {"name": name, "status": "degraded", "latency_ms": latency, "last_checked": now, "detail": "auth_failed"},
+                None,
+            )
+        elif response.status_code >= 500:
+            return (
+                {"name": name, "status": "degraded", "latency_ms": latency, "last_checked": now, "detail": "http_5xx"},
+                None,
+            )
+        else:
+            return (
+                {"name": name, "status": "degraded", "latency_ms": latency, "last_checked": now, "detail": "http_4xx"},
+                None,
+            )
+    except httpx.TimeoutException:
+        return (
+            {"name": name, "status": "offline", "latency_ms": None, "last_checked": now, "detail": "timeout"},
+            None,
+        )
+    except httpx.ConnectError:
+        return (
+            {"name": name, "status": "offline", "latency_ms": None, "last_checked": now, "detail": "connection_refused"},
+            None,
+        )
+    except httpx.HTTPError:
+        return (
+            {"name": name, "status": "offline", "latency_ms": None, "last_checked": now, "detail": "connection_refused"},
+            None,
+        )
+    except Exception:
+        return (
+            {"name": name, "status": "unknown", "latency_ms": None, "last_checked": now, "detail": None},
+            None,
+        )
+
+
+async def _check_self(name: str) -> dict:
+    """The dashboard is healthy if this endpoint is responding."""
+    return {"name": name, "status": "healthy", "latency_ms": 0, "last_checked": _now_iso(), "detail": None}
+
+
+async def _check_lm_studio_models() -> dict:
+    """Check LM Studio model availability. Projects only sanitized id and loaded fields."""
+    url = LMSTUDIO_URL
+    now = _now_iso()
+    normalized = _normalize_health_url(url)
+    if normalized is None:
+        detail = "unconfigured" if not url else "invalid_url"
+        return {"status": "unknown", "models": [], "last_checked": now, "detail": detail}
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
+            response = await client.get(f"{normalized}/v1/models")
+        latency = int((time.monotonic() - start) * 1000)
+        if 200 <= response.status_code < 300:
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+            models_raw = data.get("data", []) if isinstance(data, dict) else []
+            models = []
+            for m in models_raw:
+                if not isinstance(m, dict):
+                    continue
+                model_id = _sanitize_model_id(m.get("id"))
+                if model_id is None:
+                    continue
+                models.append({"id": model_id, "loaded": bool(m.get("loaded", False))})
+            return {"status": "healthy", "models": models, "last_checked": now, "detail": None}
+        elif response.status_code >= 500:
+            return {"status": "degraded", "models": [], "last_checked": now, "detail": "http_5xx"}
+        else:
+            return {"status": "degraded", "models": [], "last_checked": now, "detail": "http_4xx"}
+    except httpx.TimeoutException:
+        return {"status": "offline", "models": [], "last_checked": now, "detail": "timeout"}
+    except httpx.ConnectError:
+        return {"status": "offline", "models": [], "last_checked": now, "detail": "connection_refused"}
+    except httpx.HTTPError:
+        return {"status": "offline", "models": [], "last_checked": now, "detail": "connection_refused"}
+    except Exception:
+        return {"status": "unknown", "models": [], "last_checked": now, "detail": None}
+
+
+def _project_running_job(job: dict) -> dict:
+    """Project a single running job to the strict read-only allow-list.
+
+    Only safe, read-only fields are included. Prompts, secrets, credentials,
+    internal URLs, and filesystem/worktree paths are never passed through.
+    """
+    return {
+        "id": job.get("workflow_id") if isinstance(job.get("workflow_id"), str) else None,
+        "project": job.get("project") if isinstance(job.get("project"), str) else None,
+        "stage": job.get("stage") if isinstance(job.get("stage"), str) else None,
+    }
+
+
+def _project_agent_queue(gateway_data: dict) -> dict:
+    """Project gateway dashboard data to a safe agent queue summary.
+
+    Reports the accurate ``running`` count and every running job (safely
+    projected, bounded to ``MAX_RUNNING_JOBS``) rather than only the first, so
+    concurrent jobs are not hidden.
+    """
+    now = _now_iso()
+    if not gateway_data:
+        return {
+            "queued": 0, "running": 0, "running_jobs": [],
+            "current_job": None, "last_checked": now, "detail": "unavailable",
+        }
+    jobs = gateway_data.get("jobs", [])
+    if not isinstance(jobs, list):
+        jobs = []
+    queued = sum(1 for j in jobs if isinstance(j, dict) and j.get("status") == "queued")
+    running_jobs = [
+        _project_running_job(j)
+        for j in jobs
+        if isinstance(j, dict) and j.get("status") == "running"
+    ]
+    running = len(running_jobs)
+    current_job = running_jobs[0] if running_jobs else None
+    return {
+        "queued": queued,
+        "running": running,
+        "running_jobs": running_jobs[:MAX_RUNNING_JOBS],
+        "current_job": current_job,
+        "last_checked": now,
+        "detail": None,
+    }
+
+
+def _compute_overall(services: list[dict]) -> str:
+    """Compute overall cluster status from individual service statuses."""
+    relevant = [s for s in services if s.get("status") != "unknown"]
+    if not relevant:
+        return "unknown"
+    if all(s["status"] == "healthy" for s in relevant):
+        return "healthy"
+    if all(s["status"] == "offline" for s in relevant):
+        return "offline"
+    return "degraded"
+
+
+@app.get("/api/cluster-health")
+async def cluster_health(request: Request):
+    """Return a fixed allow-listed safe health payload for all registered services.
+
+    All authenticated roles (viewer, operator, admin) can read this endpoint.
+    Uses bounded concurrency and strict timeouts so a down dependency cannot
+    stall the dashboard.
+    """
+    semaphore = asyncio.Semaphore(HEALTH_CONCURRENCY)
+    gateway_data: dict = {}
+
+    async def bounded(coro):
+        async with semaphore:
+            return await coro
+
+    async def check_gateway():
+        nonlocal gateway_data
+        result, data = await _check_gateway("agent-gateway")
+        if data is not None:
+            gateway_data = data
+        return result
+
+    # Build all service check coroutines
+    service_coros = []
+    for service in HEALTH_SERVICES:
+        if service["check_type"] == "http":
+            service_coros.append(bounded(_check_http(service["name"], _service_url(service))))
+        elif service["check_type"] == "gateway":
+            service_coros.append(bounded(check_gateway()))
+        elif service["check_type"] == "self":
+            service_coros.append(bounded(_check_self(service["name"])))
+
+    # LM Studio models check (additional detail beyond the general health check)
+    lm_studio_coro = bounded(_check_lm_studio_models())
+
+    all_coros = service_coros + [lm_studio_coro]
+    results = await asyncio.gather(*all_coros, return_exceptions=True)
+
+    # Process service results
+    services = []
+    for i, result in enumerate(results[: len(HEALTH_SERVICES)]):
+        if isinstance(result, Exception):
+            services.append({
+                "name": HEALTH_SERVICES[i]["name"],
+                "status": "unknown",
+                "latency_ms": None,
+                "last_checked": _now_iso(),
+                "detail": None,
+            })
+        else:
+            services.append(result)
+
+    # Process LM Studio models result
+    lm_result = results[len(HEALTH_SERVICES)]
+    if isinstance(lm_result, Exception):
+        lm_studio = {"status": "unknown", "models": [], "last_checked": _now_iso(), "detail": None}
+    else:
+        lm_studio = lm_result
+
+    # Agent queue from gateway data
+    agent_queue = _project_agent_queue(gateway_data)
+
+    # Compute overall status
+    overall = _compute_overall(services)
+
+    return {
+        "generated_at": _now_iso(),
+        "overall": overall,
+        "services": services,
+        "lm_studio": lm_studio,
+        "agent_queue": agent_queue,
+    }
 
 
 @app.get("/health")

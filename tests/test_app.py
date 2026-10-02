@@ -2411,3 +2411,650 @@ def test_frontend_js_viewer_disables_template_controls_on_load():
     body = match.group(0)
     assert "viewer" in body
     assert "setBuildDisabled(true)" in body
+
+
+# --- Cluster Health: _normalize_health_url ---
+
+
+def test_normalize_health_url_http():
+    assert app._normalize_health_url("http://localhost:8080") == "http://localhost:8080"
+
+
+def test_normalize_health_url_https():
+    assert app._normalize_health_url("https://example.com") == "https://example.com"
+
+
+def test_normalize_health_url_trailing_slash():
+    assert app._normalize_health_url("http://localhost:8080/") == "http://localhost:8080"
+    assert app._normalize_health_url("https://example.com/") == "https://example.com"
+
+
+def test_normalize_health_url_empty():
+    assert app._normalize_health_url("") is None
+    assert app._normalize_health_url("   ") is None
+
+
+def test_normalize_health_url_rejects_file_scheme():
+    assert app._normalize_health_url("file:///etc/passwd") is None
+
+
+def test_normalize_health_url_rejects_gopher_scheme():
+    assert app._normalize_health_url("gopher://example.com") is None
+
+
+def test_normalize_health_url_rejects_non_string():
+    assert app._normalize_health_url(None) is None
+    assert app._normalize_health_url(123) is None
+
+
+# --- Cluster Health: _sanitize_model_id ---
+
+
+def test_sanitize_model_id_valid():
+    assert app._sanitize_model_id("meta-llama/Llama-3-8B") == "meta-llama/Llama-3-8B"
+
+
+def test_sanitize_model_id_max_length():
+    valid_id = "a" * app.LMSTUDIO_MODEL_ID_MAX
+    assert app._sanitize_model_id(valid_id) == valid_id
+
+
+def test_sanitize_model_id_too_long():
+    too_long = "a" * (app.LMSTUDIO_MODEL_ID_MAX + 1)
+    assert app._sanitize_model_id(too_long) is None
+
+
+def test_sanitize_model_id_unsafe_characters():
+    assert app._sanitize_model_id("model with spaces") is None
+    assert app._sanitize_model_id("model;rm -rf /") is None
+    assert app._sanitize_model_id("model\nnewline") is None
+
+
+def test_sanitize_model_id_empty():
+    assert app._sanitize_model_id("") is None
+    assert app._sanitize_model_id("   ") is None
+
+
+def test_sanitize_model_id_non_string():
+    assert app._sanitize_model_id(None) is None
+    assert app._sanitize_model_id(123) is None
+    assert app._sanitize_model_id(["list"]) is None
+
+
+# --- Cluster Health: _compute_overall ---
+
+
+def test_compute_overall_all_healthy():
+    services = [
+        {"name": "a", "status": "healthy"},
+        {"name": "b", "status": "healthy"},
+    ]
+    assert app._compute_overall(services) == "healthy"
+
+
+def test_compute_overall_all_offline():
+    services = [
+        {"name": "a", "status": "offline"},
+        {"name": "b", "status": "offline"},
+    ]
+    assert app._compute_overall(services) == "offline"
+
+
+def test_compute_overall_mixed_healthy_and_offline():
+    services = [
+        {"name": "a", "status": "healthy"},
+        {"name": "b", "status": "offline"},
+    ]
+    assert app._compute_overall(services) == "degraded"
+
+
+def test_compute_overall_mixed_healthy_and_degraded():
+    services = [
+        {"name": "a", "status": "healthy"},
+        {"name": "b", "status": "degraded"},
+    ]
+    assert app._compute_overall(services) == "degraded"
+
+
+def test_compute_overall_all_unknown():
+    services = [
+        {"name": "a", "status": "unknown"},
+        {"name": "b", "status": "unknown"},
+    ]
+    assert app._compute_overall(services) == "unknown"
+
+
+def test_compute_overall_unknown_excluded_from_computation():
+    services = [
+        {"name": "a", "status": "healthy"},
+        {"name": "b", "status": "unknown"},
+    ]
+    assert app._compute_overall(services) == "healthy"
+
+
+def test_compute_overall_empty_list():
+    assert app._compute_overall([]) == "unknown"
+
+
+# --- Cluster Health: _project_agent_queue ---
+
+
+def test_project_agent_queue_empty():
+    result = app._project_agent_queue({})
+    assert result["queued"] == 0
+    assert result["running"] == 0
+    assert result["running_jobs"] == []
+    assert result["current_job"] is None
+    assert result["detail"] == "unavailable"
+
+
+def test_project_agent_queue_queued_and_running_counts():
+    data = {
+        "jobs": [
+            {"workflow_id": "0123456789", "project": "p1", "stage": "test", "status": "queued"},
+            {"workflow_id": "0123456789", "project": "p1", "stage": "test", "status": "queued"},
+            {"workflow_id": "abcdef1234", "project": "p2", "stage": "plan", "status": "running"},
+        ]
+    }
+    result = app._project_agent_queue(data)
+    assert result["queued"] == 2
+    assert result["running"] == 1
+    assert len(result["running_jobs"]) == 1
+    assert result["current_job"]["id"] == "abcdef1234"
+    assert result["current_job"]["project"] == "p2"
+    assert result["current_job"]["stage"] == "plan"
+
+
+def test_project_agent_queue_multiple_running_jobs():
+    jobs = [
+        {"workflow_id": f"012345678{i}", "project": f"proj{i}", "stage": "test", "status": "running"}
+        for i in range(5)
+    ]
+    result = app._project_agent_queue({"jobs": jobs})
+    assert result["running"] == 5
+    assert len(result["running_jobs"]) == 5
+    assert result["current_job"]["id"] == "0123456780"
+
+
+def test_project_agent_queue_bounding():
+    """Running jobs are bounded to MAX_RUNNING_JOBS in the list, but the count is accurate."""
+    jobs = [
+        {"workflow_id": f"012345678{i:02d}", "project": f"proj{i}", "stage": "test", "status": "running"}
+        for i in range(app.MAX_RUNNING_JOBS + 10)
+    ]
+    result = app._project_agent_queue({"jobs": jobs})
+    assert result["running"] == app.MAX_RUNNING_JOBS + 10
+    assert len(result["running_jobs"]) == app.MAX_RUNNING_JOBS
+
+
+def test_project_agent_queue_no_unsafe_fields():
+    """No prompt, path, secret, or other unsafe fields leak through."""
+    data = {
+        "jobs": [
+            {
+                "workflow_id": "0123456789",
+                "project": "p1",
+                "stage": "test",
+                "status": "running",
+                "prompt": "SECRET-PROMPT-CONTENT",
+                "worktree": "/home/user/worktrees/secret-path",
+                "api_key": "sk-secret-key-12345",
+                "token": "bearer-token-abc",
+            }
+        ]
+    }
+    result = app._project_agent_queue(data)
+    raw = app.json.dumps(result)
+    assert "SECRET-PROMPT-CONTENT" not in raw
+    assert "/home/user/worktrees" not in raw
+    assert "sk-secret-key-12345" not in raw
+    assert "bearer-token-abc" not in raw
+    # Each running job must have exactly the allow-listed keys
+    for job in result["running_jobs"]:
+        assert set(job.keys()) == {"id", "project", "stage"}
+
+
+# --- Cluster Health: TestClient endpoint tests ---
+
+from contextlib import contextmanager
+
+
+def _routed_client(routes: dict):
+    """Mock AsyncClient routing GET by URL substring.
+
+    Each route maps a URL substring to either a response MagicMock or an Exception.
+    """
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    async def _get(url, **kwargs):
+        for pattern, result in routes.items():
+            if pattern in url:
+                if isinstance(result, Exception):
+                    raise result
+                return result
+        return _make_gateway_response(200, {})
+
+    mock_client.get = AsyncMock(side_effect=_get)
+    return mock_client
+
+
+@contextmanager
+def _health_env(tmp_path: Path, **urls):
+    """Patch all cluster health URLs, gateway key, and password file."""
+    m5 = urls.get("m5", "http://m5:8080")
+    lm = urls.get("lmstudio", "http://lmstudio:1234")
+    gw = urls.get("gateway", "http://gateway:8765")
+    tg = urls.get("telegram", "http://telegram:8081")
+    ow = urls.get("openwebui", "http://openwebui:3000")
+    rt = urls.get("router", "http://router:8082")
+
+    pw_file = tmp_path / "pw"
+    pw_file.write_text("test-pass", encoding="utf-8")
+    key_file = tmp_path / "gw_key"
+    key_file.write_text("test-gw-key", encoding="utf-8")
+
+    with patch.object(app, "M5_HOST_URL", m5), \
+         patch.object(app, "LMSTUDIO_URL", lm), \
+         patch.object(app, "GATEWAY_URL", gw), \
+         patch.object(app, "TELEGRAM_BOT_URL", tg), \
+         patch.object(app, "OPENWEBUI_URL", ow), \
+         patch.object(app, "ROUTER_URL", rt), \
+         patch.object(app, "GATEWAY_KEY_FILE", key_file), \
+         patch.object(app, "PASSWORD_FILE", pw_file):
+        yield
+
+
+def _all_healthy_routes():
+    """Routes making all services return healthy."""
+    return {
+        "m5:8080/health": _make_gateway_response(200, {"status": "ok"}),
+        "lmstudio:1234/health": _make_gateway_response(200, {"status": "ok"}),
+        "gateway:8765/v1/dashboard": _make_gateway_response(200, {"jobs": [], "usage": [], "counts": [], "projects": []}),
+        "telegram:8081/health": _make_gateway_response(200, {"status": "ok"}),
+        "openwebui:3000/health": _make_gateway_response(200, {"status": "ok"}),
+        "router:8082/health": _make_gateway_response(200, {"status": "ok"}),
+        "lmstudio:1234/v1/models": _make_gateway_response(200, {"data": [{"id": "test-model", "loaded": True}]}),
+    }
+
+
+def test_cluster_health_requires_auth(tmp_path: Path):
+    with _health_env(tmp_path):
+        response = TestClient(app.app).get("/api/cluster-health")
+    assert response.status_code == 401
+
+
+def test_cluster_health_rejects_wrong_password(tmp_path: Path):
+    headers = {"Authorization": _basic_auth("admin", "wrong-pass")}
+    with _health_env(tmp_path):
+        response = TestClient(app.app).get("/api/cluster-health", headers=headers)
+    assert response.status_code == 401
+
+
+def test_cluster_health_viewer_can_read(tmp_path: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch.object(app, "USERS_FILE", users_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=_viewer_auth())
+    assert response.status_code == 200
+
+
+def test_cluster_health_operator_can_read(tmp_path: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch.object(app, "USERS_FILE", users_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=_operator_auth())
+    assert response.status_code == 200
+
+
+def test_cluster_health_admin_can_read(tmp_path: Path):
+    users_file = _make_multi_role_users_file(tmp_path)
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch.object(app, "USERS_FILE", users_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=_admin_auth())
+    assert response.status_code == 200
+
+
+def test_cluster_health_exact_payload_shape(tmp_path: Path, auth_headers):
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data.keys()) == {"generated_at", "overall", "services", "lm_studio", "agent_queue"}
+    for svc in data["services"]:
+        assert set(svc.keys()) == {"name", "status", "latency_ms", "last_checked", "detail"}
+    assert set(data["lm_studio"].keys()) == {"status", "models", "last_checked", "detail"}
+    for m in data["lm_studio"]["models"]:
+        assert set(m.keys()) == {"id", "loaded"}
+    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "last_checked", "detail"}
+
+
+def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers):
+    """No gateway keys, passwords, prompts, internal URLs, or paths in the response."""
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    text = response.text
+    assert "test-gw-key" not in text
+    assert "test-pass" not in text
+    assert "m5:8080" not in text
+    assert "lmstudio:1234" not in text
+    assert "gateway:8765" not in text
+    assert "telegram:8081" not in text
+    assert "openwebui:3000" not in text
+    assert "router:8082" not in text
+    assert "/run/secrets" not in text
+    assert "/home/user" not in text
+
+
+def test_cluster_health_gateway_bearer_upstream_only(tmp_path: Path, auth_headers):
+    """The gateway key is sent as Bearer header upstream but never appears in the response."""
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    assert "test-gw-key" not in response.text
+    # Verify the gateway call received the Bearer header
+    gateway_calls = [c for c in mock_client.get.call_args_list if "v1/dashboard" in str(c)]
+    assert len(gateway_calls) == 1
+    assert gateway_calls[0].kwargs["headers"]["Authorization"] == "Bearer test-gw-key"
+
+
+def test_cluster_health_all_healthy(tmp_path: Path, auth_headers):
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall"] == "healthy"
+    for svc in data["services"]:
+        assert svc["status"] == "healthy"
+
+
+def test_cluster_health_partial_failure_degraded(tmp_path: Path, auth_headers):
+    """One service offline, rest healthy → overall degraded."""
+    routes = _all_healthy_routes()
+    routes["m5:8080/health"] = httpx.ConnectError("refused")
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall"] == "degraded"
+    m5 = next(s for s in data["services"] if s["name"] == "m5-inference")
+    assert m5["status"] == "offline"
+    assert m5["detail"] == "connection_refused"
+
+
+def test_cluster_health_all_external_offline(tmp_path: Path, auth_headers):
+    """All external services offline; self is healthy → overall degraded."""
+    routes = {
+        "m5:8080/health": httpx.ConnectError("refused"),
+        "lmstudio:1234/health": httpx.ConnectError("refused"),
+        "gateway:8765/v1/dashboard": httpx.ConnectError("refused"),
+        "telegram:8081/health": httpx.ConnectError("refused"),
+        "openwebui:3000/health": httpx.ConnectError("refused"),
+        "router:8082/health": httpx.ConnectError("refused"),
+        "lmstudio:1234/v1/models": httpx.ConnectError("refused"),
+    }
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall"] == "degraded"
+    self_svc = next(s for s in data["services"] if s["name"] == "dashboard")
+    assert self_svc["status"] == "healthy"
+
+
+def test_cluster_health_all_unconfigured_healthy(tmp_path: Path, auth_headers):
+    """All external URLs empty → unknown; self healthy → overall healthy."""
+    mock_client = _routed_client({})
+    with _health_env(tmp_path, m5="", lmstudio="", gateway="", telegram="", openwebui="", router=""), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall"] == "healthy"
+    for svc in data["services"]:
+        if svc["name"] == "dashboard":
+            assert svc["status"] == "healthy"
+        else:
+            assert svc["status"] == "unknown"
+
+
+def test_cluster_health_timeout_marks_offline(tmp_path: Path, auth_headers):
+    """A service that times out is marked offline with detail 'timeout'."""
+    routes = _all_healthy_routes()
+    routes["m5:8080/health"] = httpx.ReadTimeout("timed out")
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch.object(app, "HEALTH_TIMEOUT", 1.0), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    m5 = next(s for s in data["services"] if s["name"] == "m5-inference")
+    assert m5["status"] == "offline"
+    assert m5["detail"] == "timeout"
+
+
+def test_cluster_health_bounded_concurrency(tmp_path: Path, auth_headers):
+    """HEALTH_CONCURRENCY semaphore is used; endpoint completes correctly with a small limit."""
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch.object(app, "HEALTH_CONCURRENCY", 1), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json()["overall"] == "healthy"
+
+
+def test_cluster_health_m5_reachable(tmp_path: Path, auth_headers):
+    routes = _all_healthy_routes()
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    m5 = next(s for s in data["services"] if s["name"] == "m5-inference")
+    assert m5["status"] == "healthy"
+    assert m5["latency_ms"] is not None
+
+
+def test_cluster_health_m5_offline(tmp_path: Path, auth_headers):
+    routes = _all_healthy_routes()
+    routes["m5:8080/health"] = httpx.ConnectError("refused")
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    m5 = next(s for s in data["services"] if s["name"] == "m5-inference")
+    assert m5["status"] == "offline"
+    assert m5["detail"] == "connection_refused"
+
+
+def test_cluster_health_m5_unconfigured(tmp_path: Path, auth_headers):
+    mock_client = _routed_client({})
+    with _health_env(tmp_path, m5=""), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    m5 = next(s for s in data["services"] if s["name"] == "m5-inference")
+    assert m5["status"] == "unknown"
+    assert m5["detail"] == "unconfigured"
+
+
+def test_cluster_health_lm_studio_loaded_models(tmp_path: Path, auth_headers):
+    routes = _all_healthy_routes()
+    routes["lmstudio:1234/v1/models"] = _make_gateway_response(200, {"data": [
+        {"id": "meta-llama/Llama-3-8B", "loaded": True},
+        {"id": "mistral-7b", "loaded": False},
+    ]})
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    assert data["lm_studio"]["status"] == "healthy"
+    models = data["lm_studio"]["models"]
+    assert len(models) == 2
+    assert models[0] == {"id": "meta-llama/Llama-3-8B", "loaded": True}
+    assert models[1] == {"id": "mistral-7b", "loaded": False}
+
+
+def test_cluster_health_lm_studio_unavailable(tmp_path: Path, auth_headers):
+    routes = _all_healthy_routes()
+    routes["lmstudio:1234/v1/models"] = httpx.ConnectError("refused")
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    assert data["lm_studio"]["status"] == "offline"
+    assert data["lm_studio"]["models"] == []
+    assert data["lm_studio"]["detail"] == "connection_refused"
+
+
+def test_cluster_health_lm_studio_malformed_ids_dropped(tmp_path: Path, auth_headers):
+    """Malformed model IDs (spaces, too long, non-string) are dropped; valid ones remain."""
+    routes = _all_healthy_routes()
+    routes["lmstudio:1234/v1/models"] = _make_gateway_response(200, {"data": [
+        {"id": "valid-model", "loaded": True},
+        {"id": "model with spaces", "loaded": True},
+        {"id": "a" * (app.LMSTUDIO_MODEL_ID_MAX + 1), "loaded": True},
+        {"id": None, "loaded": True},
+        {"id": "another-valid", "loaded": False},
+    ]})
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    models = data["lm_studio"]["models"]
+    assert len(models) == 2
+    assert models[0]["id"] == "valid-model"
+    assert models[1]["id"] == "another-valid"
+
+
+def test_cluster_health_lm_studio_bounded_ids(tmp_path: Path, auth_headers):
+    """IDs at exactly the max length are kept; one over is dropped."""
+    routes = _all_healthy_routes()
+    at_max = "a" * app.LMSTUDIO_MODEL_ID_MAX
+    over_max = "a" * (app.LMSTUDIO_MODEL_ID_MAX + 1)
+    routes["lmstudio:1234/v1/models"] = _make_gateway_response(200, {"data": [
+        {"id": at_max, "loaded": True},
+        {"id": over_max, "loaded": True},
+    ]})
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    data = response.json()
+    models = data["lm_studio"]["models"]
+    assert len(models) == 1
+    assert models[0]["id"] == at_max
+
+
+# --- Frontend source contracts: cluster health panel ---
+
+
+def test_frontend_html_cluster_health_panel():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="cluster-health-panel"' in html
+    assert 'id="cluster-health"' in html
+    assert 'id="health-timestamp"' in html
+    assert "CLUSTER HEALTH" in html
+
+
+def test_frontend_js_cluster_health_uses_safe():
+    """All dynamic content in renderClusterHealth must use safe() for HTML escaping."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function renderClusterHealth\(data\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "renderClusterHealth function not found"
+    body = match.group(0)
+    assert "safe(overall)" in body
+    assert "safe(status)" in body
+    assert "safe(svc.name)" in body
+    assert "safe(svc.detail)" in body
+    assert "safe(m.id)" in body
+    assert "safe(agentQueue.current_job.id" in body
+
+
+def test_frontend_js_cluster_health_statuses():
+    """The panel renders status values dynamically via safe() for all states."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function renderClusterHealth\(data\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None
+    body = match.group(0)
+    # The function renders the overall and per-service status via safe()
+    assert "safe(overall)" in body
+    assert "safe(status)" in body
+    # Fallback values are present for missing data
+    assert "unknown" in body
+    # The CSS provides distinct classes for all four states (verified in CSS test)
+
+
+def test_frontend_js_cluster_health_timestamp():
+    """The timestamp is rendered from generated_at using toLocaleTimeString."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function renderClusterHealth\(data\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None
+    body = match.group(0)
+    assert "generated_at" in body
+    assert "toLocaleTimeString" in body
+    assert "health-timestamp" in body
+
+
+def test_frontend_html_cluster_health_aria():
+    """The cluster health container must have role=status and aria-live=polite."""
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="cluster-health"' in html
+    assert 'role="status"' in html
+    assert 'aria-live="polite"' in html
+
+
+def test_frontend_js_cluster_health_error_state():
+    """renderClusterHealthError shows a safe offline state with a muted message."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function renderClusterHealthError\(\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "renderClusterHealthError function not found"
+    body = match.group(0)
+    assert "offline" in body
+    assert "unavailable" in body
+    assert "health-timestamp" in body
+
+
+def test_frontend_js_cluster_health_polling_30s():
+    """The cluster health panel polls every 30 seconds."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "setInterval(loadClusterHealth,30000)" in js
+
+
+def test_frontend_css_cluster_health_responsive():
+    """Health cards use auto-fill grid and collapse to single column on small screens."""
+    css = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    assert ".health-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr))" in css
+    assert ".health-cards{grid-template-columns:1fr}" in css
+    assert ".health-card-wide{grid-column:auto}" in css
+    assert ".health-grid{display:grid" in css
+    assert ".health-overall.status.healthy" in css
+    assert ".health-overall.status.degraded" in css
+    assert ".health-overall.status.offline" in css
+    assert ".health-overall.status.unknown" in css
