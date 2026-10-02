@@ -29,6 +29,7 @@ TELEGRAM_BOT_URL = os.getenv("TELEGRAM_BOT_URL", "")
 OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "")
 ROUTER_URL = os.getenv("ROUTER_URL", "")
 GATEWAY_KEY_FILE = Path(os.getenv("AGENT_GATEWAY_KEY_FILE", "/run/secrets/agent_gateway_key"))
+LMSTUDIO_TOKEN_FILE = Path(os.getenv("LMSTUDIO_TOKEN_FILE", "/run/secrets/lm_studio_token"))
 PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboard_password"))
 USERS_FILE = Path(os.getenv("DASHBOARD_USERS_FILE", "/run/secrets/dashboard_users"))
 AUDIT_LOG_FILE = Path(os.getenv("DASHBOARD_AUDIT_LOG_FILE", "/tmp/local-ai-dashboard-audit.jsonl"))
@@ -55,8 +56,8 @@ HEALTH_TIMEOUT = float(os.getenv("HEALTH_CHECK_TIMEOUT", "5"))
 HEALTH_CONCURRENCY = int(os.getenv("HEALTH_CHECK_CONCURRENCY", "8"))
 
 HEALTH_SERVICES: list[dict] = [
-    {"name": "m5-inference", "url_env": "M5_HOST_URL", "check_type": "http"},
-    {"name": "lm-studio", "url_env": "LMSTUDIO_URL", "check_type": "http"},
+    {"name": "m5-inference", "url_env": "LMSTUDIO_URL", "check_type": "lm_studio"},
+    {"name": "lm-studio", "url_env": "LMSTUDIO_URL", "check_type": "lm_studio"},
     {"name": "agent-gateway", "url_env": "GATEWAY_URL", "check_type": "gateway"},
     {"name": "dashboard", "url_env": None, "check_type": "self"},
     {"name": "telegram-bot", "url_env": "TELEGRAM_BOT_URL", "check_type": "http"},
@@ -705,17 +706,31 @@ async def _check_self(name: str) -> dict:
 
 
 async def _check_lm_studio_models() -> dict:
-    """Check LM Studio model availability. Projects only sanitized id and loaded fields."""
+    """Check LM Studio model availability with authentication.
+
+    Uses the file-backed bearer token (never an environment value). The token
+    is sent upstream only and never appears in any response. The authoritative
+    endpoint is GET /v1/models (not a nonexistent /health).
+    """
     url = LMSTUDIO_URL
     now = _now_iso()
     normalized = _normalize_health_url(url)
     if normalized is None:
         detail = "unconfigured" if not url else "invalid_url"
-        return {"status": "unknown", "models": [], "last_checked": now, "detail": detail}
+        return {"status": "unknown", "models": [], "last_checked": now, "detail": detail, "latency_ms": None}
+
+    # Read the bearer token from the file-backed secret.
+    try:
+        token = LMSTUDIO_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"status": "degraded", "models": [], "last_checked": now, "detail": "auth_unavailable", "latency_ms": None}
+
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
-            response = await client.get(f"{normalized}/v1/models")
+            response = await client.get(f"{normalized}/v1/models", headers=headers)
         latency = int((time.monotonic() - start) * 1000)
         if 200 <= response.status_code < 300:
             try:
@@ -731,19 +746,21 @@ async def _check_lm_studio_models() -> dict:
                 if model_id is None:
                     continue
                 models.append({"id": model_id, "loaded": bool(m.get("loaded", False))})
-            return {"status": "healthy", "models": models, "last_checked": now, "detail": None}
+            return {"status": "healthy", "models": models, "last_checked": now, "detail": None, "latency_ms": latency}
+        elif response.status_code == 401:
+            return {"status": "degraded", "models": [], "last_checked": now, "detail": "auth_failed", "latency_ms": latency}
         elif response.status_code >= 500:
-            return {"status": "degraded", "models": [], "last_checked": now, "detail": "http_5xx"}
+            return {"status": "degraded", "models": [], "last_checked": now, "detail": "http_5xx", "latency_ms": latency}
         else:
-            return {"status": "degraded", "models": [], "last_checked": now, "detail": "http_4xx"}
+            return {"status": "degraded", "models": [], "last_checked": now, "detail": "http_4xx", "latency_ms": latency}
     except httpx.TimeoutException:
-        return {"status": "offline", "models": [], "last_checked": now, "detail": "timeout"}
+        return {"status": "offline", "models": [], "last_checked": now, "detail": "timeout", "latency_ms": None}
     except httpx.ConnectError:
-        return {"status": "offline", "models": [], "last_checked": now, "detail": "connection_refused"}
+        return {"status": "offline", "models": [], "last_checked": now, "detail": "connection_refused", "latency_ms": None}
     except httpx.HTTPError:
-        return {"status": "offline", "models": [], "last_checked": now, "detail": "connection_refused"}
+        return {"status": "offline", "models": [], "last_checked": now, "detail": "connection_refused", "latency_ms": None}
     except Exception:
-        return {"status": "unknown", "models": [], "last_checked": now, "detail": None}
+        return {"status": "unknown", "models": [], "last_checked": now, "detail": None, "latency_ms": None}
 
 
 def _project_running_job(job: dict) -> dict:
@@ -805,6 +822,17 @@ def _compute_overall(services: list[dict]) -> str:
     return "degraded"
 
 
+async def _lm_studio_to_service(name: str, result: dict) -> dict:
+    """Map the shared LM Studio check result to a standard service health dict."""
+    return {
+        "name": name,
+        "status": result["status"],
+        "latency_ms": result.get("latency_ms"),
+        "last_checked": result["last_checked"],
+        "detail": result["detail"],
+    }
+
+
 @app.get("/api/cluster-health")
 async def cluster_health(request: Request):
     """Return a fixed allow-listed safe health payload for all registered services.
@@ -827,6 +855,10 @@ async def cluster_health(request: Request):
             gateway_data = data
         return result
 
+    # LM Studio models check (shared by m5-inference and lm-studio entries;
+    # single authenticated probe to avoid duplicate/misleading checks)
+    lm_studio_result = await bounded(_check_lm_studio_models())
+
     # Build all service check coroutines
     service_coros = []
     for service in HEALTH_SERVICES:
@@ -836,16 +868,14 @@ async def cluster_health(request: Request):
             service_coros.append(bounded(check_gateway()))
         elif service["check_type"] == "self":
             service_coros.append(bounded(_check_self(service["name"])))
+        elif service["check_type"] == "lm_studio":
+            service_coros.append(_lm_studio_to_service(service["name"], lm_studio_result))
 
-    # LM Studio models check (additional detail beyond the general health check)
-    lm_studio_coro = bounded(_check_lm_studio_models())
-
-    all_coros = service_coros + [lm_studio_coro]
-    results = await asyncio.gather(*all_coros, return_exceptions=True)
+    results = await asyncio.gather(*service_coros, return_exceptions=True)
 
     # Process service results
     services = []
-    for i, result in enumerate(results[: len(HEALTH_SERVICES)]):
+    for i, result in enumerate(results):
         if isinstance(result, Exception):
             services.append({
                 "name": HEALTH_SERVICES[i]["name"],
@@ -857,12 +887,13 @@ async def cluster_health(request: Request):
         else:
             services.append(result)
 
-    # Process LM Studio models result
-    lm_result = results[len(HEALTH_SERVICES)]
-    if isinstance(lm_result, Exception):
-        lm_studio = {"status": "unknown", "models": [], "last_checked": _now_iso(), "detail": None}
-    else:
-        lm_studio = lm_result
+    # LM Studio detail section (from the shared authenticated result)
+    lm_studio = {
+        "status": lm_studio_result["status"],
+        "models": lm_studio_result["models"],
+        "last_checked": lm_studio_result["last_checked"],
+        "detail": lm_studio_result["detail"],
+    }
 
     # Agent queue from gateway data
     agent_queue = _project_agent_queue(gateway_data)

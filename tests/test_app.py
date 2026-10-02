@@ -1909,6 +1909,28 @@ def test_compose_uses_file_backed_secrets_not_inline():
     assert "host.docker.internal" in compose
 
 
+def test_compose_cluster_health_configuration():
+    """Verify the compose deployment matches the cluster health requirements:
+    - Joins m1-agent-repo_chat plus default network
+    - Uses router:4000 and open-webui:8080
+    - Uses file-backed lm_studio_token for 10.10.10.1:1234
+    - Telegram is empty (unconfigured, no real endpoint)
+    """
+    compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
+    # Network: joins m1-agent-repo_chat (external) plus default
+    assert "m1-agent-repo_chat" in compose
+    assert "external: true" in compose
+    # Router and Open WebUI use the correct internal service URLs
+    assert "http://router:4000" in compose
+    assert "http://open-webui:8080" in compose
+    # LM Studio uses the file-backed token and the correct URL
+    assert "http://10.10.10.1:1234" in compose
+    assert "lm_studio_token" in compose
+    assert "LMSTUDIO_TOKEN_FILE" in compose
+    # Telegram is explicitly empty (unconfigured)
+    assert 'TELEGRAM_BOT_URL: ""' in compose
+
+
 # --- Template API: fixtures and helpers ---
 
 
@@ -2642,7 +2664,7 @@ def _routed_client(routes: dict):
 
 @contextmanager
 def _health_env(tmp_path: Path, **urls):
-    """Patch all cluster health URLs, gateway key, and password file."""
+    """Patch all cluster health URLs, gateway key, LM token, and password file."""
     m5 = urls.get("m5", "http://m5:8080")
     lm = urls.get("lmstudio", "http://lmstudio:1234")
     gw = urls.get("gateway", "http://gateway:8765")
@@ -2654,6 +2676,8 @@ def _health_env(tmp_path: Path, **urls):
     pw_file.write_text("test-pass", encoding="utf-8")
     key_file = tmp_path / "gw_key"
     key_file.write_text("test-gw-key", encoding="utf-8")
+    lm_token_file = tmp_path / "lm_token"
+    lm_token_file.write_text("test-lm-token", encoding="utf-8")
 
     with patch.object(app, "M5_HOST_URL", m5), \
          patch.object(app, "LMSTUDIO_URL", lm), \
@@ -2662,6 +2686,7 @@ def _health_env(tmp_path: Path, **urls):
          patch.object(app, "OPENWEBUI_URL", ow), \
          patch.object(app, "ROUTER_URL", rt), \
          patch.object(app, "GATEWAY_KEY_FILE", key_file), \
+         patch.object(app, "LMSTUDIO_TOKEN_FILE", lm_token_file), \
          patch.object(app, "PASSWORD_FILE", pw_file):
         yield
 
@@ -2669,13 +2694,11 @@ def _health_env(tmp_path: Path, **urls):
 def _all_healthy_routes():
     """Routes making all services return healthy."""
     return {
-        "m5:8080/health": _make_gateway_response(200, {"status": "ok"}),
-        "lmstudio:1234/health": _make_gateway_response(200, {"status": "ok"}),
+        "lmstudio:1234/v1/models": _make_gateway_response(200, {"data": [{"id": "test-model", "loaded": True}]}),
         "gateway:8765/v1/dashboard": _make_gateway_response(200, {"jobs": [], "usage": [], "counts": [], "projects": []}),
         "telegram:8081/health": _make_gateway_response(200, {"status": "ok"}),
         "openwebui:3000/health": _make_gateway_response(200, {"status": "ok"}),
         "router:8082/health": _make_gateway_response(200, {"status": "ok"}),
-        "lmstudio:1234/v1/models": _make_gateway_response(200, {"data": [{"id": "test-model", "loaded": True}]}),
     }
 
 
@@ -2739,7 +2762,7 @@ def test_cluster_health_exact_payload_shape(tmp_path: Path, auth_headers):
 
 
 def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers):
-    """No gateway keys, passwords, prompts, internal URLs, or paths in the response."""
+    """No gateway keys, passwords, LM tokens, prompts, internal URLs, or paths in the response."""
     mock_client = _routed_client(_all_healthy_routes())
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
@@ -2748,6 +2771,7 @@ def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers
     text = response.text
     assert "test-gw-key" not in text
     assert "test-pass" not in text
+    assert "test-lm-token" not in text
     assert "m5:8080" not in text
     assert "lmstudio:1234" not in text
     assert "gateway:8765" not in text
@@ -2772,6 +2796,23 @@ def test_cluster_health_gateway_bearer_upstream_only(tmp_path: Path, auth_header
     assert gateway_calls[0].kwargs["headers"]["Authorization"] == "Bearer test-gw-key"
 
 
+def test_cluster_health_lm_studio_token_bearer_upstream_only(tmp_path: Path, auth_headers):
+    """The LM Studio token is sent as Bearer header to /v1/models but never appears in the response."""
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    assert "test-lm-token" not in response.text
+    # Verify the LM Studio call hit /v1/models (not /health) with the Bearer token
+    lm_calls = [c for c in mock_client.get.call_args_list if "v1/models" in str(c)]
+    assert len(lm_calls) == 1, f"Expected exactly 1 /v1/models call, got {len(lm_calls)}"
+    assert lm_calls[0].kwargs["headers"]["Authorization"] == "Bearer test-lm-token"
+    # Verify no /health call was made to LM Studio
+    lm_health_calls = [c for c in mock_client.get.call_args_list if "lmstudio:1234/health" in str(c)]
+    assert len(lm_health_calls) == 0, "Must not probe nonexistent LM Studio /health"
+
+
 def test_cluster_health_all_healthy(tmp_path: Path, auth_headers):
     mock_client = _routed_client(_all_healthy_routes())
     with _health_env(tmp_path), \
@@ -2787,7 +2828,7 @@ def test_cluster_health_all_healthy(tmp_path: Path, auth_headers):
 def test_cluster_health_partial_failure_degraded(tmp_path: Path, auth_headers):
     """One service offline, rest healthy → overall degraded."""
     routes = _all_healthy_routes()
-    routes["m5:8080/health"] = httpx.ConnectError("refused")
+    routes["lmstudio:1234/v1/models"] = httpx.ConnectError("refused")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
@@ -2803,13 +2844,11 @@ def test_cluster_health_partial_failure_degraded(tmp_path: Path, auth_headers):
 def test_cluster_health_all_external_offline(tmp_path: Path, auth_headers):
     """All external services offline; self is healthy → overall degraded."""
     routes = {
-        "m5:8080/health": httpx.ConnectError("refused"),
-        "lmstudio:1234/health": httpx.ConnectError("refused"),
+        "lmstudio:1234/v1/models": httpx.ConnectError("refused"),
         "gateway:8765/v1/dashboard": httpx.ConnectError("refused"),
         "telegram:8081/health": httpx.ConnectError("refused"),
         "openwebui:3000/health": httpx.ConnectError("refused"),
         "router:8082/health": httpx.ConnectError("refused"),
-        "lmstudio:1234/v1/models": httpx.ConnectError("refused"),
     }
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
@@ -2836,12 +2875,29 @@ def test_cluster_health_all_unconfigured_healthy(tmp_path: Path, auth_headers):
             assert svc["status"] == "healthy"
         else:
             assert svc["status"] == "unknown"
+            assert svc["detail"] == "unconfigured"
+
+
+def test_cluster_health_telegram_unconfigured(tmp_path: Path, auth_headers):
+    """Telegram with empty URL reports unknown/unconfigured without probing any endpoint."""
+    mock_client = _routed_client({})
+    with _health_env(tmp_path, telegram=""), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    tg = next(s for s in data["services"] if s["name"] == "telegram-bot")
+    assert tg["status"] == "unknown"
+    assert tg["detail"] == "unconfigured"
+    # No HTTP call should have been made to telegram
+    tg_calls = [c for c in mock_client.get.call_args_list if "telegram" in str(c)]
+    assert len(tg_calls) == 0, "Must not probe telegram when unconfigured"
 
 
 def test_cluster_health_timeout_marks_offline(tmp_path: Path, auth_headers):
     """A service that times out is marked offline with detail 'timeout'."""
     routes = _all_healthy_routes()
-    routes["m5:8080/health"] = httpx.ReadTimeout("timed out")
+    routes["lmstudio:1234/v1/models"] = httpx.ReadTimeout("timed out")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch.object(app, "HEALTH_TIMEOUT", 1.0), \
@@ -2879,7 +2935,7 @@ def test_cluster_health_m5_reachable(tmp_path: Path, auth_headers):
 
 def test_cluster_health_m5_offline(tmp_path: Path, auth_headers):
     routes = _all_healthy_routes()
-    routes["m5:8080/health"] = httpx.ConnectError("refused")
+    routes["lmstudio:1234/v1/models"] = httpx.ConnectError("refused")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
@@ -2892,7 +2948,7 @@ def test_cluster_health_m5_offline(tmp_path: Path, auth_headers):
 
 def test_cluster_health_m5_unconfigured(tmp_path: Path, auth_headers):
     mock_client = _routed_client({})
-    with _health_env(tmp_path, m5=""), \
+    with _health_env(tmp_path, lmstudio=""), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
         response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
     data = response.json()
