@@ -710,7 +710,8 @@ async def _check_lm_studio_models() -> dict:
 
     Uses the file-backed bearer token (never an environment value). The token
     is sent upstream only and never appears in any response. The authoritative
-    endpoint is GET /v1/models (not a nonexistent /health).
+    endpoint is the native LM Studio GET /api/v1/models (not the OpenAI-compatible
+    /v1/models or a nonexistent /health).
     """
     url = LMSTUDIO_URL
     now = _now_iso()
@@ -730,22 +731,24 @@ async def _check_lm_studio_models() -> dict:
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
-            response = await client.get(f"{normalized}/v1/models", headers=headers)
+            response = await client.get(f"{normalized}/api/v1/models", headers=headers)
         latency = int((time.monotonic() - start) * 1000)
         if 200 <= response.status_code < 300:
             try:
                 data = response.json()
             except Exception:
                 data = {}
-            models_raw = data.get("data", []) if isinstance(data, dict) else []
+            models_raw = data.get("models", []) if isinstance(data, dict) else []
             models = []
             for m in models_raw:
                 if not isinstance(m, dict):
                     continue
-                model_id = _sanitize_model_id(m.get("id"))
+                model_id = _sanitize_model_id(m.get("key"))
                 if model_id is None:
                     continue
-                models.append({"id": model_id, "loaded": bool(m.get("loaded", False))})
+                loaded_instances = m.get("loaded_instances")
+                loaded = isinstance(loaded_instances, list) and len(loaded_instances) > 0
+                models.append({"id": model_id, "loaded": loaded})
             return {"status": "healthy", "models": models, "last_checked": now, "detail": None, "latency_ms": latency}
         elif response.status_code == 401:
             return {"status": "degraded", "models": [], "last_checked": now, "detail": "auth_failed", "latency_ms": latency}

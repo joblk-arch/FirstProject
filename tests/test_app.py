@@ -2694,7 +2694,7 @@ def _health_env(tmp_path: Path, **urls):
 def _all_healthy_routes():
     """Routes making all services return healthy."""
     return {
-        "lmstudio:1234/v1/models": _make_gateway_response(200, {"data": [{"id": "test-model", "loaded": True}]}),
+        "lmstudio:1234/api/v1/models": _make_gateway_response(200, {"models": [{"key": "test-model", "loaded_instances": [1]}]}),
         "gateway:8765/v1/dashboard": _make_gateway_response(200, {"jobs": [], "usage": [], "counts": [], "projects": []}),
         "telegram:8081/health": _make_gateway_response(200, {"status": "ok"}),
         "openwebui:3000/health": _make_gateway_response(200, {"status": "ok"}),
@@ -2797,17 +2797,20 @@ def test_cluster_health_gateway_bearer_upstream_only(tmp_path: Path, auth_header
 
 
 def test_cluster_health_lm_studio_token_bearer_upstream_only(tmp_path: Path, auth_headers):
-    """The LM Studio token is sent as Bearer header to /v1/models but never appears in the response."""
+    """The LM Studio token is sent as Bearer header to /api/v1/models but never appears in the response."""
     mock_client = _routed_client(_all_healthy_routes())
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
         response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
     assert response.status_code == 200
     assert "test-lm-token" not in response.text
-    # Verify the LM Studio call hit /v1/models (not /health) with the Bearer token
-    lm_calls = [c for c in mock_client.get.call_args_list if "v1/models" in str(c)]
-    assert len(lm_calls) == 1, f"Expected exactly 1 /v1/models call, got {len(lm_calls)}"
+    # Verify the LM Studio call hit the native /api/v1/models with the Bearer token
+    lm_calls = [c for c in mock_client.get.call_args_list if "api/v1/models" in str(c)]
+    assert len(lm_calls) == 1, f"Expected exactly 1 /api/v1/models call, got {len(lm_calls)}"
     assert lm_calls[0].kwargs["headers"]["Authorization"] == "Bearer test-lm-token"
+    # Verify no legacy OpenAI-compatible /v1/models call (without /api prefix) was made
+    legacy_calls = [c for c in mock_client.get.call_args_list if "/v1/models" in str(c) and "api/v1/models" not in str(c)]
+    assert len(legacy_calls) == 0, "Must not probe legacy OpenAI-compatible /v1/models"
     # Verify no /health call was made to LM Studio
     lm_health_calls = [c for c in mock_client.get.call_args_list if "lmstudio:1234/health" in str(c)]
     assert len(lm_health_calls) == 0, "Must not probe nonexistent LM Studio /health"
@@ -2828,7 +2831,7 @@ def test_cluster_health_all_healthy(tmp_path: Path, auth_headers):
 def test_cluster_health_partial_failure_degraded(tmp_path: Path, auth_headers):
     """One service offline, rest healthy → overall degraded."""
     routes = _all_healthy_routes()
-    routes["lmstudio:1234/v1/models"] = httpx.ConnectError("refused")
+    routes["lmstudio:1234/api/v1/models"] = httpx.ConnectError("refused")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
@@ -2844,7 +2847,7 @@ def test_cluster_health_partial_failure_degraded(tmp_path: Path, auth_headers):
 def test_cluster_health_all_external_offline(tmp_path: Path, auth_headers):
     """All external services offline; self is healthy → overall degraded."""
     routes = {
-        "lmstudio:1234/v1/models": httpx.ConnectError("refused"),
+        "lmstudio:1234/api/v1/models": httpx.ConnectError("refused"),
         "gateway:8765/v1/dashboard": httpx.ConnectError("refused"),
         "telegram:8081/health": httpx.ConnectError("refused"),
         "openwebui:3000/health": httpx.ConnectError("refused"),
@@ -2897,7 +2900,7 @@ def test_cluster_health_telegram_unconfigured(tmp_path: Path, auth_headers):
 def test_cluster_health_timeout_marks_offline(tmp_path: Path, auth_headers):
     """A service that times out is marked offline with detail 'timeout'."""
     routes = _all_healthy_routes()
-    routes["lmstudio:1234/v1/models"] = httpx.ReadTimeout("timed out")
+    routes["lmstudio:1234/api/v1/models"] = httpx.ReadTimeout("timed out")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch.object(app, "HEALTH_TIMEOUT", 1.0), \
@@ -2935,7 +2938,7 @@ def test_cluster_health_m5_reachable(tmp_path: Path, auth_headers):
 
 def test_cluster_health_m5_offline(tmp_path: Path, auth_headers):
     routes = _all_healthy_routes()
-    routes["lmstudio:1234/v1/models"] = httpx.ConnectError("refused")
+    routes["lmstudio:1234/api/v1/models"] = httpx.ConnectError("refused")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
@@ -2959,9 +2962,9 @@ def test_cluster_health_m5_unconfigured(tmp_path: Path, auth_headers):
 
 def test_cluster_health_lm_studio_loaded_models(tmp_path: Path, auth_headers):
     routes = _all_healthy_routes()
-    routes["lmstudio:1234/v1/models"] = _make_gateway_response(200, {"data": [
-        {"id": "meta-llama/Llama-3-8B", "loaded": True},
-        {"id": "mistral-7b", "loaded": False},
+    routes["lmstudio:1234/api/v1/models"] = _make_gateway_response(200, {"models": [
+        {"key": "meta-llama/Llama-3-8B", "loaded_instances": [1, 2]},
+        {"key": "mistral-7b", "loaded_instances": []},
     ]})
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
@@ -2977,7 +2980,7 @@ def test_cluster_health_lm_studio_loaded_models(tmp_path: Path, auth_headers):
 
 def test_cluster_health_lm_studio_unavailable(tmp_path: Path, auth_headers):
     routes = _all_healthy_routes()
-    routes["lmstudio:1234/v1/models"] = httpx.ConnectError("refused")
+    routes["lmstudio:1234/api/v1/models"] = httpx.ConnectError("refused")
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
@@ -2991,12 +2994,12 @@ def test_cluster_health_lm_studio_unavailable(tmp_path: Path, auth_headers):
 def test_cluster_health_lm_studio_malformed_ids_dropped(tmp_path: Path, auth_headers):
     """Malformed model IDs (spaces, too long, non-string) are dropped; valid ones remain."""
     routes = _all_healthy_routes()
-    routes["lmstudio:1234/v1/models"] = _make_gateway_response(200, {"data": [
-        {"id": "valid-model", "loaded": True},
-        {"id": "model with spaces", "loaded": True},
-        {"id": "a" * (app.LMSTUDIO_MODEL_ID_MAX + 1), "loaded": True},
-        {"id": None, "loaded": True},
-        {"id": "another-valid", "loaded": False},
+    routes["lmstudio:1234/api/v1/models"] = _make_gateway_response(200, {"models": [
+        {"key": "valid-model", "loaded_instances": [1]},
+        {"key": "model with spaces", "loaded_instances": [1]},
+        {"key": "a" * (app.LMSTUDIO_MODEL_ID_MAX + 1), "loaded_instances": [1]},
+        {"key": None, "loaded_instances": [1]},
+        {"key": "another-valid", "loaded_instances": []},
     ]})
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
@@ -3014,9 +3017,9 @@ def test_cluster_health_lm_studio_bounded_ids(tmp_path: Path, auth_headers):
     routes = _all_healthy_routes()
     at_max = "a" * app.LMSTUDIO_MODEL_ID_MAX
     over_max = "a" * (app.LMSTUDIO_MODEL_ID_MAX + 1)
-    routes["lmstudio:1234/v1/models"] = _make_gateway_response(200, {"data": [
-        {"id": at_max, "loaded": True},
-        {"id": over_max, "loaded": True},
+    routes["lmstudio:1234/api/v1/models"] = _make_gateway_response(200, {"models": [
+        {"key": at_max, "loaded_instances": [1]},
+        {"key": over_max, "loaded_instances": [1]},
     ]})
     mock_client = _routed_client(routes)
     with _health_env(tmp_path), \
@@ -3026,6 +3029,67 @@ def test_cluster_health_lm_studio_bounded_ids(tmp_path: Path, auth_headers):
     models = data["lm_studio"]["models"]
     assert len(models) == 1
     assert models[0]["id"] == at_max
+
+
+def test_cluster_health_lm_studio_live_response_regression(tmp_path: Path, auth_headers):
+    """Regression matching the live LM Studio /api/v1/models response shape.
+
+    DeepSeek and Qwen are loaded (loaded_instances non-empty); Gemma and the
+    embedding model are available but not loaded (loaded_instances empty).
+    Extra fields in the native response are ignored.
+    """
+    routes = _all_healthy_routes()
+    routes["lmstudio:1234/api/v1/models"] = _make_gateway_response(200, {"models": [
+        {
+            "key": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+            "loaded_instances": [1, 2],
+            "model_path": "/models/deepseek",
+            "context_length": 4096,
+        },
+        {
+            "key": "Qwen/Qwen2.5-7B-Instruct",
+            "loaded_instances": [3],
+            "model_path": "/models/qwen",
+            "context_length": 8192,
+        },
+        {
+            "key": "google/gemma-2-9b-it",
+            "loaded_instances": [],
+            "model_path": "/models/gemma",
+            "context_length": 8192,
+        },
+        {
+            "key": "sentence-transformers/all-MiniLM-L6-v2",
+            "loaded_instances": [],
+            "model_path": "/models/embedding",
+            "context_length": 512,
+        },
+    ]})
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["lm_studio"]["status"] == "healthy"
+    models = data["lm_studio"]["models"]
+    assert len(models) == 4
+    # DeepSeek: loaded (loaded_instances has 2 entries)
+    assert models[0] == {"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "loaded": True}
+    # Qwen: loaded (loaded_instances has 1 entry)
+    assert models[1] == {"id": "Qwen/Qwen2.5-7B-Instruct", "loaded": True}
+    # Gemma: available but not loaded (loaded_instances empty)
+    assert models[2] == {"id": "google/gemma-2-9b-it", "loaded": False}
+    # Embedding model: available but not loaded (loaded_instances empty)
+    assert models[3] == {"id": "sentence-transformers/all-MiniLM-L6-v2", "loaded": False}
+    # No internal paths or extra fields leak into the response
+    text = response.text
+    assert "/models/deepseek" not in text
+    assert "/models/qwen" not in text
+    assert "/models/gemma" not in text
+    assert "/models/embedding" not in text
+    assert "context_length" not in text
+    assert "model_path" not in text
 
 
 # --- Frontend source contracts: cluster health panel ---
