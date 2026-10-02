@@ -142,18 +142,36 @@ function normalizeBuildIntent(project, objective, reasoning) {
   return `${project}\u0000${objective}\u0000${reasoning}`;
 }
 
+function generateUUID() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    // Set version 4 bits (RFC 4122 §4.4)
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    // Set variant 10xx bits (RFC 4122 §4.3)
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+  }
+  throw new Error('Web Crypto API is unavailable in this browser. Use a modern browser or serve over HTTPS.');
+}
+
 function getBuildKey(project, objective, reasoning) {
   const intent = normalizeBuildIntent(project, objective, reasoning);
   if (buildKey && buildKeyIntent === intent) return buildKey;
+  const newKey = generateUUID();
+  buildKey = newKey;
   buildKeyIntent = intent;
-  buildKey = crypto.randomUUID();
   return buildKey;
 }
 
 function rotateBuildKey(project, objective, reasoning) {
   const intent = normalizeBuildIntent(project, objective, reasoning);
+  const newKey = generateUUID();
+  buildKey = newKey;
   buildKeyIntent = intent;
-  buildKey = crypto.randomUUID();
 }
 
 function clearBuildKey() {
@@ -173,12 +191,12 @@ async function startBuild(event) {
     return;
   }
 
-  const idempotencyKey = getBuildKey(project, objective, reasoning);
   buildInFlight = true;
   setBuildDisabled(true);
   setBuildStatus('Submitting…');
 
   try {
+    const idempotencyKey = getBuildKey(project, objective, reasoning);
     const response = await fetch('/api/workflows', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -214,8 +232,8 @@ async function startBuild(event) {
     buildInFlight = false;
     await load();
     if (result.id) openWorkflow(result.id);
-  } catch {
-    setBuildStatus('Network error. Please try again.', true);
+  } catch (error) {
+    setBuildStatus(error.message || 'Network error. Please try again.', true);
     setBuildDisabled(false);
     buildInFlight = false;
   }
