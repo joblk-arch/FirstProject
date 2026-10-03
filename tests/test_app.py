@@ -1914,7 +1914,7 @@ def test_compose_cluster_health_configuration():
     - Joins m1-agent-repo_chat plus default network
     - Uses router:4000 and open-webui:8080
     - Uses file-backed lm_studio_token for 10.10.10.1:1234
-    - Telegram is empty (unconfigured, no real endpoint)
+    - Telegram uses the internal service URL on the external network
     """
     compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
     # Network: joins m1-agent-repo_chat (external) plus default
@@ -1927,8 +1927,72 @@ def test_compose_cluster_health_configuration():
     assert "http://10.10.10.1:1234" in compose
     assert "lm_studio_token" in compose
     assert "LMSTUDIO_TOKEN_FILE" in compose
-    # Telegram is explicitly empty (unconfigured)
-    assert 'TELEGRAM_BOT_URL: ""' in compose
+    # Telegram uses the internal service URL on the external network
+    assert "TELEGRAM_BOT_URL: http://telegram-bot:8080" in compose
+
+
+def test_compose_telegram_uses_service_name_not_ip():
+    """The TELEGRAM_BOT_URL must use the Docker DNS service name, not a container IP."""
+    compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
+    match = re.search(r"TELEGRAM_BOT_URL:\s*(\S+)", compose)
+    assert match is not None, "TELEGRAM_BOT_URL must be set in compose.yaml"
+    url = match.group(1)
+    # Must use the service name telegram-bot
+    assert "telegram-bot" in url, f"URL must use service name 'telegram-bot', got: {url}"
+    # Must NOT use a dotted-quad IP address
+    assert not re.search(r"\d+\.\d+\.\d+\.\d+", url), f"URL must not contain a container IP: {url}"
+
+
+def test_compose_no_telegram_port_published():
+    """No ports entry may publish the Telegram health port to the host or LAN."""
+    compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
+    # The only published port is the dashboard's 192.168.68.68:8088:8080
+    ports_section = re.findall(r'ports:.*?(?=\n    \S|\Z)', compose, re.DOTALL)
+    for block in ports_section:
+        # No port mapping should reference 8080 as a container port for telegram
+        # The dashboard publishes 8088:8080 (host:container) which is fine
+        lines = [l.strip() for l in block.strip().splitlines() if l.strip().startswith("-")]
+        for line in lines:
+            # Extract the port mapping
+            port_match = re.search(r'"?(\S+):(\d+):(\d+)"?', line)
+            if port_match:
+                host_port = port_match.group(2)
+                container_port = port_match.group(3)
+                # The only allowed published port is 8088->8080 for the dashboard
+                assert host_port == "8088" and container_port == "8080", (
+                    f"Unexpected published port mapping: {line}. "
+                    "Only the dashboard 8088:8080 may be published."
+                )
+
+
+def test_compose_external_network_only_dashboard():
+    """Only the dashboard service may list m1-agent-repo_chat in its networks.
+    The dashboard must retain the default network alongside the external one."""
+    compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
+    # Capture the full services block: everything after "services:\n" until the next top-level key
+    services_match = re.search(r"^services:\n(.*?)(?=^\S|\Z)", compose, re.MULTILINE | re.DOTALL)
+    assert services_match is not None, "compose.yaml must have a services section"
+    services_block = services_match.group(1)
+    # Find all service names (2-space indent, name followed by colon)
+    service_names = re.findall(r"^  (\S+):", services_block, re.MULTILINE)
+    assert "dashboard" in service_names, f"dashboard service not found; got {service_names}"
+    # Extract the dashboard service block (from "  dashboard:" to next 2-space-indented key or end)
+    dashboard_match = re.search(r"^  dashboard:\n(.*?)(?=^  \S|\Z)", services_block, re.MULTILINE | re.DOTALL)
+    assert dashboard_match is not None, "dashboard service block not found"
+    dashboard_block = dashboard_match.group(0)
+    # Dashboard must retain the default network
+    assert "default" in dashboard_block, "dashboard must retain the default network"
+    # Dashboard must join the external m1-agent-repo_chat network
+    assert "m1-agent-repo_chat" in dashboard_block, "dashboard must join m1-agent-repo_chat"
+    # No other service should list m1-agent-repo_chat
+    for svc in service_names:
+        if svc == "dashboard":
+            continue
+        svc_match = re.search(rf"^  {re.escape(svc)}:\n(.*?)(?=^  \S|\Z)", services_block, re.MULTILINE | re.DOTALL)
+        if svc_match:
+            assert "m1-agent-repo_chat" not in svc_match.group(0), (
+                f"Service '{svc}' must not join m1-agent-repo_chat"
+            )
 
 
 # --- Template API: fixtures and helpers ---
@@ -2668,7 +2732,7 @@ def _health_env(tmp_path: Path, **urls):
     m5 = urls.get("m5", "http://m5:8080")
     lm = urls.get("lmstudio", "http://lmstudio:1234")
     gw = urls.get("gateway", "http://gateway:8765")
-    tg = urls.get("telegram", "http://telegram:8081")
+    tg = urls.get("telegram", "http://telegram-bot:8080")
     ow = urls.get("openwebui", "http://openwebui:3000")
     rt = urls.get("router", "http://router:8082")
 
@@ -2696,7 +2760,7 @@ def _all_healthy_routes():
     return {
         "lmstudio:1234/api/v1/models": _make_gateway_response(200, {"models": [{"key": "test-model", "loaded_instances": [1]}]}),
         "gateway:8765/v1/dashboard": _make_gateway_response(200, {"jobs": [], "usage": [], "counts": [], "projects": []}),
-        "telegram:8081/health": _make_gateway_response(200, {"status": "ok"}),
+        "telegram-bot:8080/health": _make_gateway_response(200, {"status": "ok"}),
         "openwebui:3000/health": _make_gateway_response(200, {"status": "ok"}),
         "router:8082/health": _make_gateway_response(200, {"status": "ok"}),
     }
@@ -2775,7 +2839,7 @@ def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers
     assert "m5:8080" not in text
     assert "lmstudio:1234" not in text
     assert "gateway:8765" not in text
-    assert "telegram:8081" not in text
+    assert "telegram-bot:8080" not in text
     assert "openwebui:3000" not in text
     assert "router:8082" not in text
     assert "/run/secrets" not in text
@@ -2849,7 +2913,7 @@ def test_cluster_health_all_external_offline(tmp_path: Path, auth_headers):
     routes = {
         "lmstudio:1234/api/v1/models": httpx.ConnectError("refused"),
         "gateway:8765/v1/dashboard": httpx.ConnectError("refused"),
-        "telegram:8081/health": httpx.ConnectError("refused"),
+        "telegram-bot:8080/health": httpx.ConnectError("refused"),
         "openwebui:3000/health": httpx.ConnectError("refused"),
         "router:8082/health": httpx.ConnectError("refused"),
     }
@@ -2895,6 +2959,101 @@ def test_cluster_health_telegram_unconfigured(tmp_path: Path, auth_headers):
     # No HTTP call should have been made to telegram
     tg_calls = [c for c in mock_client.get.call_args_list if "telegram" in str(c)]
     assert len(tg_calls) == 0, "Must not probe telegram when unconfigured"
+
+
+def test_cluster_health_telegram_healthy(tmp_path: Path, auth_headers):
+    """Telegram bot returns 200 → status healthy, overall healthy (all services up)."""
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    tg = next(s for s in data["services"] if s["name"] == "telegram-bot")
+    assert tg["status"] == "healthy"
+    assert tg["detail"] is None
+    assert tg["latency_ms"] is not None
+    assert data["overall"] == "healthy"
+
+
+def test_cluster_health_telegram_offline(tmp_path: Path, auth_headers):
+    """Telegram bot connection refused → status offline, detail connection_refused, overall degraded."""
+    routes = _all_healthy_routes()
+    routes["telegram-bot:8080/health"] = httpx.ConnectError("connection refused")
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    tg = next(s for s in data["services"] if s["name"] == "telegram-bot")
+    assert tg["status"] == "offline"
+    assert tg["detail"] == "connection_refused"
+    assert tg["latency_ms"] is None
+    assert data["overall"] == "degraded"
+
+
+def test_cluster_health_telegram_url_not_in_response(tmp_path: Path, auth_headers):
+    """The internal telegram-bot:8080 URL must never appear in the API response body."""
+    mock_client = _routed_client(_all_healthy_routes())
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    text = response.text
+    assert "telegram-bot:8080" not in text
+    assert "http://telegram-bot" not in text
+
+
+def test_cluster_health_overall_with_telegram_offline_only(tmp_path: Path, auth_headers):
+    """All services healthy except telegram-bot offline → overall degraded (not offline)."""
+    routes = _all_healthy_routes()
+    routes["telegram-bot:8080/health"] = httpx.ConnectError("refused")
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    # All other services must be healthy
+    for svc in data["services"]:
+        if svc["name"] != "telegram-bot":
+            assert svc["status"] == "healthy", f"{svc['name']} should be healthy"
+    # Telegram is offline
+    tg = next(s for s in data["services"] if s["name"] == "telegram-bot")
+    assert tg["status"] == "offline"
+    # Overall is degraded (not offline) because dashboard self-check is always healthy
+    assert data["overall"] == "degraded"
+
+
+def test_cluster_health_overall_all_offline_including_telegram(tmp_path: Path, auth_headers):
+    """All external services offline (including telegram) → overall degraded.
+
+    The dashboard self-check always returns healthy, so the overall can never
+    be 'offline' in practice. All-externals-offline yields 'degraded'.
+    """
+    routes = {
+        "lmstudio:1234/api/v1/models": httpx.ConnectError("refused"),
+        "gateway:8765/v1/dashboard": httpx.ConnectError("refused"),
+        "telegram-bot:8080/health": httpx.ConnectError("refused"),
+        "openwebui:3000/health": httpx.ConnectError("refused"),
+        "router:8082/health": httpx.ConnectError("refused"),
+    }
+    mock_client = _routed_client(routes)
+    with _health_env(tmp_path), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/cluster-health", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    # Dashboard self-check is always healthy
+    self_svc = next(s for s in data["services"] if s["name"] == "dashboard")
+    assert self_svc["status"] == "healthy"
+    # All external services are offline
+    for svc in data["services"]:
+        if svc["name"] != "dashboard":
+            assert svc["status"] == "offline", f"{svc['name']} should be offline"
+    # Overall is degraded (self is healthy, so not all are offline)
+    assert data["overall"] == "degraded"
 
 
 def test_cluster_health_timeout_marks_offline(tmp_path: Path, auth_headers):
