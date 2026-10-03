@@ -86,6 +86,11 @@
         </div>
         <div id="cluster-health" class="health-grid" role="status" aria-live="polite"></div>
       </section>
+      <section class="panel span-2" id="alerts-panel" aria-labelledby="alerts-title">
+        <div class="panel-head"><div><p class="eyebrow">ALERTS</p><h2 id="alerts-title">Active alerts</h2></div><span class="hint" id="alerts-hint"></span></div>
+        <div id="alerts" class="alerts-list" role="status" aria-live="polite"></div>
+        <div id="alerts-history" class="alerts-history" aria-label="Acknowledged alert history"></div>
+      </section>
       <section class="panel span-2">
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></div>
         <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>

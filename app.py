@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import Response
@@ -1059,6 +1059,267 @@ async def cluster_health(request: Request):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+class AcknowledgeAlertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resolution_note: str
+    confirm: str
+
+
+_ALERT_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
+def _project_alert(raw: dict) -> dict:
+    """Project a single alert to the strict read-only allow-list.
+
+    Only safe, read-only fields are included. Prompts, secrets, credentials,
+    internal URLs, filesystem/worktree paths, branches, commit SHAs, and
+    resolution notes are never passed through.
+    """
+    job_id = raw.get("job_id")
+    if not isinstance(job_id, str) or _ALERT_ID_RE.fullmatch(job_id) is None:
+        job_id = None
+    project = raw.get("project") if isinstance(raw.get("project"), str) else None
+    status = raw.get("status") if isinstance(raw.get("status"), str) else None
+    created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) else None
+    acknowledged = _safe_bool(raw.get("acknowledged"))
+    acknowledged_at = raw.get("acknowledged_at") if isinstance(raw.get("acknowledged_at"), str) else None
+    return {
+        "job_id": job_id,
+        "project": project,
+        "status": status,
+        "created_at": created_at,
+        "acknowledged": acknowledged,
+        "acknowledged_at": acknowledged_at,
+    }
+
+
+MAX_ALERT_HISTORY = 20
+
+
+def _project_alerts(gateway_data: dict) -> dict:
+    """Project gateway alert data to a safe alerts summary.
+
+    Reports active alerts and recent acknowledged-alert history using only the
+    infrastructure gateway safe projections. Never exposes full prompts, outputs,
+    errors, filesystem paths, branches, commit SHAs, internal service URLs,
+    database details, credentials, or resolution notes.
+    """
+    active_raw = gateway_data.get("active_alerts")
+    if not isinstance(active_raw, list):
+        active_raw = []
+    history_raw = gateway_data.get("acknowledged_alerts")
+    if not isinstance(history_raw, list):
+        history_raw = []
+    active = [_project_alert(a) for a in active_raw if isinstance(a, dict)]
+    active = [a for a in active if a["job_id"] is not None]
+    history = [_project_alert(a) for a in history_raw if isinstance(a, dict)]
+    history = [a for a in history if a["job_id"] is not None]
+    return {
+        "active": active,
+        "history": history[:MAX_ALERT_HISTORY],
+    }
+
+
+@app.get("/api/alerts")
+async def list_alerts(request: Request):
+    """Return safe projections of active alerts and acknowledgment history.
+
+    All authenticated roles (viewer, operator, admin) can read this endpoint.
+    """
+    key = _read_gateway_key()
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.get(
+                f"{GATEWAY_URL}/v1/dashboard",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Upstream gateway unavailable")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="Upstream gateway error")
+    try:
+        raw = response.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Invalid upstream response")
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=502, detail="Invalid upstream response")
+    return _project_alerts(raw)
+
+
+ACKNOWLEDGE_MAX_BODY_BYTES = 1024
+ACKNOWLEDGE_TIMEOUT = 30.0
+
+_ACK_PATH_RE = re.compile(r"^/api/alerts/[0-9a-f]{12}/acknowledge$")
+
+_413_BODY = b'{"detail":"Request body too large"}'
+_400_CL_BODY = b'{"detail":"Invalid Content-Length"}'
+
+
+class _AcknowledgeBodyLimitMiddleware:
+    """Narrowly scoped ASGI middleware enforcing a body size limit on
+    POST /api/alerts/{canonical-12-hex}/acknowledge.
+
+    Runs before routing and before Pydantic body parsing. It:
+    - Early-rejects a valid Content-Length over the limit (413).
+    - Rejects invalid or negative Content-Length (400).
+    - Independently streams at most limit+1 bytes so missing, understated,
+      or dishonest Content-Length cannot permit an oversized body.
+    - Restores the bounded body for downstream parsing.
+    - Returns a fixed small response with no body echo, secret, URL, path,
+      or upstream data.
+
+    Behavior is isolated to this one route; all other requests pass through
+    unchanged. Authentication and security behavior is preserved.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        if not _ACK_PATH_RE.match(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+
+        # --- Content-Length fast-path checks ---
+        cl_raw = None
+        for k, v in scope.get("headers", []):
+            if k.lower() == b"content-length":
+                cl_raw = v.decode("ascii", errors="replace")
+                break
+
+        if cl_raw is not None:
+            try:
+                cl = int(cl_raw)
+            except (ValueError, TypeError):
+                await self._fixed_response(send, 400, _400_CL_BODY)
+                return
+            if cl < 0:
+                await self._fixed_response(send, 400, _400_CL_BODY)
+                return
+            if cl > ACKNOWLEDGE_MAX_BODY_BYTES:
+                await self._fixed_response(send, 413, _413_BODY)
+                return
+
+        # --- Stream body, reading at most limit+1 bytes ---
+        body = b""
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                break
+            if message["type"] != "http.request":
+                continue
+            body += message.get("body", b"")
+            if len(body) > ACKNOWLEDGE_MAX_BODY_BYTES:
+                await self._fixed_response(send, 413, _413_BODY)
+                return
+            if not message.get("more_body", False):
+                break
+
+        # --- Replay bounded body for downstream ---
+        body_sent = False
+
+        async def bounded_receive():
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            while True:
+                msg = await receive()
+                if msg["type"] == "http.disconnect":
+                    return msg
+
+        await self.app(scope, bounded_receive, send)
+
+    @staticmethod
+    async def _fixed_response(send, status: int, body: bytes) -> None:
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(body)).encode()],
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(_AcknowledgeBodyLimitMiddleware)
+
+
+@app.post("/api/alerts/{job_id}/acknowledge")
+async def acknowledge_alert(job_id: str, payload: AcknowledgeAlertRequest, request: Request):
+    """Acknowledge a single active alert. Admin-only.
+
+    Trust boundary: the agent gateway credential is cluster-wide and remains
+    server-side. FirstProject intentionally exposes only this one fixed
+    acknowledgment operation to the dashboard. The gateway key is read from a
+    file-backed secret, sent only as an upstream Bearer token, and never
+    appears in any response, log, or browser-visible artifact.
+
+    This is the only state-changing operation exposed by the dashboard for
+    alerts. It submits a fixed acknowledgment to the gateway's fixed
+    acknowledgment endpoint (POST /v1/alerts/acknowledge). It never retries,
+    cancels, approves, merges, deploys, pushes, discards, deletes, cleans up,
+    executes shell or Git commands, changes job or workflow status, or updates
+    arbitrary infrastructure data.
+    """
+    if request.state.role != "admin":
+        _audit(request, job_id, "acknowledge_alert", "denied")
+        raise HTTPException(status_code=403, detail="Alert acknowledgment requires admin access")
+
+    if _ALERT_ID_RE.fullmatch(job_id) is None:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    if payload.confirm != job_id:
+        _audit(request, job_id, "acknowledge_alert", "confirmation_rejected")
+        raise HTTPException(status_code=400, detail="Confirmation does not match the alert job ID")
+
+    note = payload.resolution_note.strip()
+    if len(note) < 1 or len(note) > 500:
+        raise HTTPException(status_code=400, detail="Resolution note must be 1 to 500 characters")
+    if any(ord(c) < 32 for c in note):
+        raise HTTPException(status_code=400, detail="Resolution note contains invalid control characters")
+
+    # Actor is always server-derived from the authenticated session identity.
+    # It is never accepted from the browser.
+    actor = request.state.username
+    if not isinstance(actor, str) or len(actor) < 1 or len(actor) > 128 or "\n" in actor:
+        raise HTTPException(status_code=500, detail="Invalid server identity")
+
+    _audit(request, job_id, "acknowledge_alert", "attempted")
+
+    key = _read_gateway_key()
+    async with httpx.AsyncClient(timeout=ACKNOWLEDGE_TIMEOUT) as client:
+        try:
+            response = await client.post(
+                f"{GATEWAY_URL}/v1/alerts/acknowledge",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"job_id": job_id, "resolution_note": note, "actor": actor},
+            )
+        except httpx.HTTPError:
+            _audit(request, job_id, "acknowledge_alert", "upstream_unavailable")
+            raise HTTPException(status_code=502, detail="Upstream gateway unavailable")
+
+    if response.status_code == 409:
+        _audit(request, job_id, "acknowledge_alert", "state_rejected")
+        raise HTTPException(status_code=409, detail="Alert is not in an active state")
+    if response.status_code == 404:
+        _audit(request, job_id, "acknowledge_alert", "not_found")
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if response.status_code >= 400:
+        _audit(request, job_id, "acknowledge_alert", "upstream_failed")
+        raise HTTPException(status_code=502, detail="Upstream gateway error")
+    _audit(request, job_id, "acknowledge_alert", "succeeded")
+    return {"ok": True, "job_id": job_id}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

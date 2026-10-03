@@ -4063,3 +4063,913 @@ def test_repair_state_not_yet_activated():
 def test_repair_state_malformed_values():
     """All malformed values result in None → state none."""
     assert app._derive_repair_state(None, None, None, None, None, None) == "none"
+
+
+# --- Alerts: _project_alert ---
+
+
+def test_project_alert_valid():
+    raw = {
+        "job_id": "abcdef123456",
+        "project": "firstproject",
+        "status": "failed",
+        "created_at": "2025-01-15T10:00:00Z",
+        "acknowledged": False,
+        "acknowledged_at": None,
+    }
+    result = app._project_alert(raw)
+    assert result == {
+        "job_id": "abcdef123456",
+        "project": "firstproject",
+        "status": "failed",
+        "created_at": "2025-01-15T10:00:00Z",
+        "acknowledged": False,
+        "acknowledged_at": None,
+    }
+
+
+def test_project_alert_invalid_job_id():
+    raw = {"job_id": "not-valid", "project": "p1", "status": "failed"}
+    result = app._project_alert(raw)
+    assert result["job_id"] is None
+
+
+def test_project_alert_never_leaks_unsafe_fields():
+    raw = {
+        "job_id": "abcdef123456",
+        "project": "firstproject",
+        "status": "failed",
+        "created_at": "2025-01-15T10:00:00Z",
+        "prompt": "SECRET-PROMPT",
+        "worktree": "/home/user/worktrees/secret",
+        "api_key": "sk-secret-123",
+        "branch": "main",
+        "commit_sha": "abc123def456",
+        "internal_url": "http://internal:9999",
+        "resolution_note": "SECRET-NOTE",
+        "error": "SECRET-ERROR",
+    }
+    result = app._project_alert(raw)
+    raw_json = app.json.dumps(result)
+    assert "SECRET-PROMPT" not in raw_json
+    assert "/home/user/worktrees" not in raw_json
+    assert "sk-secret-123" not in raw_json
+    assert "abc123def456" not in raw_json
+    assert "internal:9999" not in raw_json
+    assert "SECRET-NOTE" not in raw_json
+    assert "SECRET-ERROR" not in raw_json
+    assert set(result.keys()) == {"job_id", "project", "status", "created_at", "acknowledged", "acknowledged_at"}
+
+
+# --- Alerts: _project_alerts ---
+
+
+def test_project_alerts_empty():
+    result = app._project_alerts({})
+    assert result == {"active": [], "history": []}
+
+
+def test_project_alerts_valid():
+    data = {
+        "active_alerts": [
+            {"job_id": "abcdef123456", "project": "p1", "status": "failed", "created_at": "2025-01-15T10:00:00Z"},
+            {"job_id": "111111111111", "project": "p2", "status": "blocked", "created_at": "2025-01-15T11:00:00Z"},
+        ],
+        "acknowledged_alerts": [
+            {"job_id": "222222222222", "project": "p1", "status": "failed", "created_at": "2025-01-14T10:00:00Z", "acknowledged": True, "acknowledged_at": "2025-01-15T09:00:00Z"},
+        ],
+    }
+    result = app._project_alerts(data)
+    assert len(result["active"]) == 2
+    assert len(result["history"]) == 1
+    assert result["history"][0]["acknowledged"] is True
+
+
+def test_project_alerts_filters_invalid_ids():
+    data = {
+        "active_alerts": [
+            {"job_id": "abcdef123456", "project": "p1", "status": "failed"},
+            {"job_id": "invalid", "project": "p2", "status": "failed"},
+            {"job_id": None, "project": "p3", "status": "failed"},
+        ],
+    }
+    result = app._project_alerts(data)
+    assert len(result["active"]) == 1
+    assert result["active"][0]["job_id"] == "abcdef123456"
+
+
+def test_project_alerts_bounded_history():
+    data = {
+        "acknowledged_alerts": [
+            {"job_id": f"{'a' * 12}", "project": "p1", "status": "failed", "acknowledged": True}
+            for _ in range(app.MAX_ALERT_HISTORY + 10)
+        ],
+    }
+    result = app._project_alerts(data)
+    assert len(result["history"]) == app.MAX_ALERT_HISTORY
+
+
+def test_project_alerts_never_leaks_unsafe_fields():
+    data = {
+        "active_alerts": [
+            {
+                "job_id": "abcdef123456",
+                "project": "p1",
+                "status": "failed",
+                "prompt": "SECRET-PROMPT",
+                "worktree": "/home/user/worktrees/secret",
+                "api_key": "sk-secret-123",
+                "branch": "main",
+                "commit_sha": "abc123def456",
+                "internal_url": "http://internal:9999",
+                "resolution_note": "SECRET-NOTE",
+                "error": "SECRET-ERROR",
+            },
+        ],
+    }
+    result = app._project_alerts(data)
+    raw_json = app.json.dumps(result)
+    assert "SECRET-PROMPT" not in raw_json
+    assert "/home/user/worktrees" not in raw_json
+    assert "sk-secret-123" not in raw_json
+    assert "abc123def456" not in raw_json
+    assert "internal:9999" not in raw_json
+    assert "SECRET-NOTE" not in raw_json
+    assert "SECRET-ERROR" not in raw_json
+
+
+# --- Alerts: GET /api/alerts ---
+
+
+def test_alerts_requires_auth(password_file, gateway_key_file):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        client = TestClient(app.app)
+        response = client.get("/api/alerts")
+    assert response.status_code == 401
+
+
+def test_alerts_viewer_can_read(tmp_path: Path, password_file, gateway_key_file):
+    users_file = _make_multi_role_users_file(tmp_path)
+    mock_client = _make_async_client_mock(
+        _make_gateway_response(200, {"active_alerts": [], "acknowledged_alerts": []})
+    )
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=_viewer_auth())
+    assert response.status_code == 200
+    assert response.json() == {"active": [], "history": []}
+
+
+def test_alerts_returns_safe_projections(password_file, gateway_key_file, auth_headers):
+    payload = {
+        "active_alerts": [
+            {"job_id": "abcdef123456", "project": "firstproject", "status": "failed", "created_at": "2025-01-15T10:00:00Z", "prompt": "SECRET"},
+        ],
+        "acknowledged_alerts": [
+            {"job_id": "111111111111", "project": "p2", "status": "failed", "created_at": "2025-01-14T10:00:00Z", "acknowledged": True, "acknowledged_at": "2025-01-15T09:00:00Z"},
+        ],
+    }
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["active"]) == 1
+    assert data["active"][0]["job_id"] == "abcdef123456"
+    assert "SECRET" not in response.text
+    assert len(data["history"]) == 1
+    assert data["history"][0]["acknowledged"] is True
+
+
+def test_alerts_upstream_unavailable(password_file, gateway_key_file, auth_headers):
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway unavailable"
+
+
+def test_alerts_never_leaks_gateway_key(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"active_alerts": []}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert "test-gateway-key" not in response.text
+
+
+# --- Alerts: POST /api/alerts/{job_id}/acknowledge ---
+
+
+def test_acknowledge_requires_auth(password_file, gateway_key_file):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        client = TestClient(app.app)
+        response = client.post(
+            "/api/alerts/abcdef123456/acknowledge",
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 401
+
+
+def test_acknowledge_viewer_denied(tmp_path: Path, password_file, gateway_key_file):
+    users_file = _make_multi_role_users_file(tmp_path)
+    audit_file = tmp_path / "audit.jsonl"
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=_viewer_auth(),
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 403
+    assert "admin" in response.json()["detail"]
+    audit = app.json.loads(audit_file.read_text(encoding="utf-8"))
+    assert audit["action"] == "acknowledge_alert"
+    assert audit["outcome"] == "denied"
+
+
+def test_acknowledge_operator_denied(tmp_path: Path, password_file, gateway_key_file):
+    users_file = _make_multi_role_users_file(tmp_path)
+    audit_file = tmp_path / "audit.jsonl"
+    with patch.object(app, "USERS_FILE", users_file), \
+         patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=_operator_auth(),
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 403
+
+
+def test_acknowledge_admin_success(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Investigated and resolved", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "job_id": "abcdef123456"}
+    call = mock_client.post.await_args
+    assert call.args[0].endswith("/v1/alerts/acknowledge")
+    assert call.kwargs["json"] == {"job_id": "abcdef123456", "resolution_note": "Investigated and resolved", "actor": "admin"}
+    assert call.kwargs["headers"]["Authorization"] == "Bearer test-gateway-key"
+
+
+def test_acknowledge_invalid_job_id(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/not-valid/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "not-valid"},
+        )
+    assert response.status_code == 404
+
+
+def test_acknowledge_confirmation_mismatch(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "111111111111"},
+        )
+    assert response.status_code == 400
+    assert "Confirmation" in response.json()["detail"]
+
+
+def test_acknowledge_empty_note(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "   ", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 400
+    assert "1 to 500" in response.json()["detail"]
+
+
+def test_acknowledge_overlong_note(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "a" * 501, "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 400
+    assert "1 to 500" in response.json()["detail"]
+
+
+def test_acknowledge_control_chars(password_file, auth_headers):
+    with patch.object(app, "PASSWORD_FILE", password_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "bad\nnote", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 400
+    assert "control" in response.json()["detail"]
+
+
+def test_acknowledge_gateway_409(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(409, {"error": "unsafe"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Alert is not in an active state"
+    assert "unsafe" not in response.text
+
+
+def test_acknowledge_gateway_404(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(404, {"error": "not found"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Alert not found"
+
+
+def test_acknowledge_gateway_500(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(500, {"error": "traceback"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway error"
+    assert "traceback" not in response.text
+
+
+def test_acknowledge_gateway_connection_error(password_file, gateway_key_file, auth_headers):
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway unavailable"
+
+
+def test_acknowledge_never_leaks_gateway_key(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(500, {"error": "boom"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert "test-gateway-key" not in response.text
+
+
+def test_acknowledge_never_leaks_gateway_url(password_file, gateway_key_file, auth_headers):
+    mock_client = _make_async_client_mock(_make_gateway_response(500, {"error": "boom"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "GATEWAY_URL", "http://internal-secret:9999"), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    assert "internal-secret" not in response.text
+
+
+def test_acknowledge_audit_entries(password_file, gateway_key_file, auth_headers, tmp_path: Path):
+    audit_file = tmp_path / "ack-audit.jsonl"
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    entries = [app.json.loads(line) for line in audit_file.read_text().splitlines()]
+    assert [e["outcome"] for e in entries] == ["attempted", "succeeded"]
+    assert all(e["action"] == "acknowledge_alert" for e in entries)
+    assert all(e["actor"] == "admin" for e in entries)
+
+
+def test_acknowledge_no_lifecycle_operations(password_file, gateway_key_file, auth_headers):
+    """The acknowledge endpoint must only call the fixed acknowledge endpoint,
+    never any lifecycle operation (retry, cancel, approve, merge, push, cleanup)."""
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    # Only one POST call should have been made
+    assert mock_client.post.call_count == 1
+    call_url = mock_client.post.await_args.args[0]
+    assert "/acknowledge" in call_url
+    # Must not contain any lifecycle operation keywords
+    for op in ("retry", "cancel", "approve", "merge", "push", "cleanup", "deploy", "discard", "delete"):
+        assert op not in call_url, f"URL must not contain lifecycle operation: {op}"
+
+
+def test_acknowledge_fixed_upstream_destination(password_file, gateway_key_file, auth_headers):
+    """The upstream URL must be the fixed gateway acknowledge endpoint."""
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "GATEWAY_URL", "http://fixed-gateway:8765"), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+    call_url = mock_client.post.await_args.args[0]
+    assert call_url == "http://fixed-gateway:8765/v1/alerts/acknowledge"
+
+
+def test_acknowledge_strict_request_shape(password_file, gateway_key_file, auth_headers):
+    """Extra fields in the request body are rejected with 422 (extra='forbid')."""
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456", "extra": "malicious"},
+        )
+    assert response.status_code == 422
+
+
+# --- Alerts: Frontend source contracts ---
+
+
+def test_frontend_html_has_alerts_panel():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="alerts-panel"' in html
+    assert 'id="alerts"' in html
+    assert 'id="alerts-history"' in html
+    assert "ALERTS" in html
+
+
+def test_frontend_js_has_alerts_functions():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "loadAlerts" in js
+    assert "renderAlerts" in js
+    assert "acknowledgeAlert" in js
+    assert "ackInFlight" in js
+
+
+def test_frontend_js_alerts_uses_safe():
+    """All dynamic content in renderAlerts must use safe() for HTML escaping."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function renderAlerts\(data\)\s*\{.*?\n\}", js, re.DOTALL)
+    assert match is not None, "renderAlerts function not found"
+    body = match.group(0)
+    assert "safe(a.job_id)" in body
+    assert "safe(a.project)" in body
+    assert "safe(a.status)" in body
+
+
+def test_frontend_js_alerts_aria():
+    """The alerts container must have role=status and aria-live=polite."""
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="alerts"' in html
+    assert 'role="status"' in html
+    assert 'aria-live="polite"' in html
+
+
+def test_frontend_js_acknowledge_double_click_guard():
+    """The acknowledge function must have an in-flight guard."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"async function acknowledgeAlert\(.*?\n\}", js, re.DOTALL)
+    assert match is not None, "acknowledgeAlert function not found"
+    body = match.group(0)
+    assert "ackInFlight" in body
+    assert "if (ackInFlight) return;" in body
+
+
+def test_frontend_js_acknowledge_requires_confirmation():
+    """The acknowledge function must require explicit confirmation naming the job ID."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"async function acknowledgeAlert\(.*?\n\}", js, re.DOTALL)
+    assert match is not None
+    body = match.group(0)
+    assert "confirmInput" in body
+    assert "jobId" in body
+
+
+def test_frontend_js_acknowledge_sends_confirm():
+    """The acknowledge POST must include the confirm field matching the job ID."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"async function acknowledgeAlert\(.*?\n\}", js, re.DOTALL)
+    assert match is not None
+    body = match.group(0)
+    assert "confirm: jobId" in body
+
+
+def test_frontend_js_alerts_polling():
+    """The alerts panel must poll periodically."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "setInterval(loadAlerts,30000)" in js
+
+
+def test_frontend_css_has_alerts_styles():
+    css = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    assert ".alerts-list" in css
+    assert ".alert-item" in css
+    assert ".acknowledge-btn" in css
+    assert ".alert-status" in css
+
+
+def test_frontend_css_alerts_responsive():
+    """Alert items must be responsive on small screens."""
+    css = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    assert ".alert-item-head" in css
+
+
+def test_acknowledge_route_not_in_workflow_actions():
+    """The acknowledge route must not be part of the workflow actions system."""
+    routes = [r.path for r in app.app.routes]
+    ack_routes = [r for r in routes if "acknowledge" in r.lower()]
+    assert len(ack_routes) == 1
+    assert ack_routes[0] == "/api/alerts/{job_id}/acknowledge"
+
+
+def test_acknowledge_not_a_workflow_action():
+    """'acknowledge' must not be in WORKFLOW_ACTIONS."""
+    assert "acknowledge" not in app.WORKFLOW_ACTIONS
+
+
+# --- Alerts: Body limit middleware (ASGI-level) ---
+
+
+def _run_asgi_post(path, headers=None, body=b""):
+    """Call the ASGI app directly with full control over scope and receive.
+
+    This allows testing scenarios that TestClient/httpx cannot express:
+    missing Content-Length, understated Content-Length, etc.
+    """
+    import asyncio
+
+    all_headers = [(b"host", b"testserver")]
+    if headers:
+        for k, v in headers.items():
+            all_headers.append((k.lower().encode(), v.encode()))
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": all_headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+
+    body_sent = False
+
+    async def receive():
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    result = {"status": None, "headers": {}, "body": b""}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            result["status"] = message["status"]
+            result["headers"] = {k.decode(): v.decode() for k, v in message.get("headers", [])}
+        elif message["type"] == "http.response.body":
+            result["body"] += message.get("body", b"")
+
+    asyncio.run(app.app(scope, receive, send))
+    return result
+
+
+def _auth_header(username="admin", password="test-pass"):
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
+def test_acknowledge_413_honest_oversized_content_length(password_file, gateway_key_file):
+    """A valid Content-Length over the limit is rejected with 413 before auth."""
+    oversized_body = b"x" * 2000
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": str(len(oversized_body))},
+            body=oversized_body,
+        )
+    assert result["status"] == 413
+    assert result["body"] == b'{"detail":"Request body too large"}'
+
+
+def test_acknowledge_413_no_content_length_oversized_body(password_file, gateway_key_file):
+    """Missing Content-Length with an oversized streamed body is rejected with 413.
+
+    The middleware independently streams the body and detects the oversize
+    even without a Content-Length header.
+    """
+    oversized_body = b"x" * 2000
+    # No Content-Length header in the scope
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={},  # No Content-Length
+            body=oversized_body,
+        )
+    assert result["status"] == 413
+    assert result["body"] == b'{"detail":"Request body too large"}'
+
+
+def test_acknowledge_413_understated_content_length(password_file, gateway_key_file):
+    """Understated Content-Length (says 100, actual is 2000) is rejected with 413.
+
+    The CL is within the limit so the fast-path doesn't trigger, but the
+    independent stream read detects the actual oversize.
+    """
+    actual_body = b"x" * 2000
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": "100"},  # Understated
+            body=actual_body,
+        )
+    assert result["status"] == 413
+    assert result["body"] == b'{"detail":"Request body too large"}'
+
+
+def test_acknowledge_exact_boundary_body_passes(password_file, gateway_key_file):
+    """A body of exactly ACKNOWLEDGE_MAX_BODY_BYTES (1024) passes the middleware.
+
+    The body is within the limit, so it is replayed for downstream processing.
+    The route handler may reject it for other reasons (e.g., note too long),
+    but it must NOT be rejected with 413 by the middleware.
+    """
+    # Craft a JSON body of exactly 1024 bytes
+    # {"resolution_note":"<N chars>","confirm":"abcdef123456"}
+    # Overhead: {"resolution_note":" = 20, ","confirm":"abcdef123456"} = 27
+    # Total = 47 + N, so N = 1024 - 47 = 977
+    note = "a" * 977
+    body = ('{"resolution_note":"' + note + '","confirm":"abcdef123456"}').encode()
+    assert len(body) == 1024, f"Expected 1024 bytes, got {len(body)}"
+
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"ok": True}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={**_auth_header(), "Content-Length": str(len(body))},
+            body=body,
+        )
+    # Must NOT be 413 (the middleware let it through)
+    assert result["status"] != 413
+    # Downstream validation rejects the deliberately oversized note.
+    # Depending on FastAPI/Pydantic version this is 400 (handler check) or
+    # 422 (Pydantic validation); both are safe client errors.
+    assert result["status"] in (400, 422)
+
+
+def test_acknowledge_400_malformed_content_length(password_file, gateway_key_file):
+    """A non-numeric Content-Length is rejected with 400."""
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": "not-a-number"},
+            body=b"{}",
+        )
+    assert result["status"] == 400
+    assert result["body"] == b'{"detail":"Invalid Content-Length"}'
+
+
+def test_acknowledge_400_negative_content_length(password_file, gateway_key_file):
+    """A negative Content-Length is rejected with 400."""
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": "-1"},
+            body=b"",
+        )
+    assert result["status"] == 400
+    assert result["body"] == b'{"detail":"Invalid Content-Length"}'
+
+
+def test_acknowledge_413_upstream_never_called(password_file, gateway_key_file):
+    """The upstream gateway is never called when the body is rejected."""
+    oversized_body = b"x" * 2000
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock()
+    mock_client.get = AsyncMock()
+
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": str(len(oversized_body))},
+            body=oversized_body,
+        )
+    assert result["status"] == 413
+    # No upstream call was made
+    mock_client.post.assert_not_called()
+    mock_client.get.assert_not_called()
+
+
+def test_acknowledge_413_response_non_disclosure(password_file, gateway_key_file):
+    """The 413 response discloses no body content, secrets, URLs, or paths."""
+    # Body must be over 1024 bytes to trigger 413
+    secret_body = (b'{"resolution_note":"SECRET-DATA-xyz","confirm":"abcdef123456","leak":"http://internal:9999"}' * 20)
+    assert len(secret_body) > app.ACKNOWLEDGE_MAX_BODY_BYTES
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "GATEWAY_URL", "http://internal-secret:9999"):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": str(len(secret_body))},
+            body=secret_body,
+        )
+    assert result["status"] == 413
+    response_text = result["body"].decode()
+    # No body content echoed
+    assert "SECRET-DATA-xyz" not in response_text
+    # No internal URLs
+    assert "internal-secret" not in response_text
+    assert "internal:9999" not in response_text
+    # No secrets
+    assert "test-gateway-key" not in response_text
+    # No filesystem paths
+    assert "/run/secrets" not in response_text
+    # Fixed response body
+    assert response_text == '{"detail":"Request body too large"}'
+
+
+def test_acknowledge_400_response_non_disclosure(password_file, gateway_key_file):
+    """The 400 response for invalid Content-Length discloses no sensitive data."""
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "GATEWAY_URL", "http://internal-secret:9999"):
+        result = _run_asgi_post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers={"Content-Length": "abc"},
+            body=b"{}",
+        )
+    assert result["status"] == 400
+    response_text = result["body"].decode()
+    assert "internal-secret" not in response_text
+    assert "test-gateway-key" not in response_text
+    assert "/run/secrets" not in response_text
+    assert response_text == '{"detail":"Invalid Content-Length"}'
+
+
+def test_acknowledge_body_limit_does_not_affect_other_routes(password_file, gateway_key_file, auth_headers):
+    """The body limit middleware only applies to the acknowledge route.
+
+    Other POST routes with large bodies are unaffected.
+    """
+    large_body = b"x" * 5000
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        # POST to /api/workflows with a large body should NOT get 413 from middleware
+        result = _run_asgi_post(
+            "/api/workflows",
+            headers={**_auth_header(), "Content-Length": str(len(large_body)), "Content-Type": "application/json"},
+            body=large_body,
+        )
+    # Should not be 413 (middleware doesn't apply to this route)
+    assert result["status"] != 413
+    # Will be 422 (invalid JSON) or 400 (validation) but not 413
+    assert result["status"] in (400, 422)
+
+
+def test_acknowledge_body_limit_ignores_non_post(password_file, gateway_key_file):
+    """GET requests to the acknowledge path are not affected by the body limit."""
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/alerts/abcdef123456/acknowledge",
+        "raw_path": b"/api/alerts/abcdef123456/acknowledge",
+        "query_string": b"",
+        "headers": [(b"host", b"testserver"), (b"content-length", b"99999")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    result = {"status": None, "body": b""}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            result["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            result["body"] += message.get("body", b"")
+
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file):
+        asyncio.run(app.app(scope, receive, send))
+    # GET is not POST, so middleware passes through; route will 405 or similar
+    assert result["status"] != 413
+
+
+# --- Alerts: Acknowledge timeout test ---
+
+
+def test_acknowledge_timeout_returns_safe_502(password_file, gateway_key_file, auth_headers, tmp_path: Path):
+    """When the upstream gateway times out (httpx.ReadTimeout), the endpoint
+    returns a fixed safe 502, audits upstream_unavailable, and the AsyncClient
+    receives the bounded ACKNOWLEDGE_TIMEOUT value.
+    """
+    audit_file = tmp_path / "timeout-audit.jsonl"
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "AUDIT_LOG_FILE", audit_file), \
+         patch.object(app, "GATEWAY_URL", "http://internal-secret:9999"), \
+         patch("app.httpx.AsyncClient", return_value=mock_client) as mock_cls:
+        response = TestClient(app.app).post(
+            "/api/alerts/abcdef123456/acknowledge",
+            headers=auth_headers,
+            json={"resolution_note": "Fixed", "confirm": "abcdef123456"},
+        )
+
+    # Fixed safe 502 response
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway unavailable"
+    # No upstream text, URL, or key leaked
+    assert "internal-secret" not in response.text
+    assert "9999" not in response.text
+    assert "test-gateway-key" not in response.text
+    assert "timed out" not in response.text
+    # Audit outcome is upstream_unavailable
+    entries = [app.json.loads(line) for line in audit_file.read_text().splitlines()]
+    outcomes = [e["outcome"] for e in entries]
+    assert "upstream_unavailable" in outcomes
+    # The AsyncClient was created with the ACKNOWLEDGE_TIMEOUT value
+    call_kwargs = mock_cls.call_args.kwargs
+    timeout_value = call_kwargs.get("timeout")
+    assert timeout_value == app.ACKNOWLEDGE_TIMEOUT
+    # Timeout is finite and reasonably bounded
+    assert timeout_value is not None
+    assert timeout_value > 0
+    assert timeout_value <= 60.0, f"Timeout {timeout_value}s is unreasonably large"
