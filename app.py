@@ -1071,28 +1071,38 @@ class AcknowledgeAlertRequest(BaseModel):
 _ALERT_ID_RE = re.compile(r"[0-9a-f]{12}")
 
 
-def _project_alert(raw: dict) -> dict:
-    """Project a single alert to the strict read-only allow-list.
-
-    Only safe, read-only fields are included. Prompts, secrets, credentials,
-    internal URLs, filesystem/worktree paths, branches, commit SHAs, and
-    resolution notes are never passed through.
-    """
+def _project_active_alert(raw: dict) -> dict:
+    """Project a single active alert to the strict read-only allow-list."""
     job_id = raw.get("job_id")
     if not isinstance(job_id, str) or _ALERT_ID_RE.fullmatch(job_id) is None:
         job_id = None
-    project = raw.get("project") if isinstance(raw.get("project"), str) else None
-    status = raw.get("status") if isinstance(raw.get("status"), str) else None
-    created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) else None
-    acknowledged = _safe_bool(raw.get("acknowledged"))
-    acknowledged_at = raw.get("acknowledged_at") if isinstance(raw.get("acknowledged_at"), str) else None
     return {
         "job_id": job_id,
-        "project": project,
-        "status": status,
-        "created_at": created_at,
-        "acknowledged": acknowledged,
-        "acknowledged_at": acknowledged_at,
+        "status": raw.get("status") if isinstance(raw.get("status"), str) else None,
+        "role": raw.get("role") if isinstance(raw.get("role"), str) else None,
+        "project": raw.get("project") if isinstance(raw.get("project"), str) else None,
+        "stage": raw.get("stage") if isinstance(raw.get("stage"), str) else None,
+        "created_at": raw.get("created_at") if isinstance(raw.get("created_at"), str) else None,
+    }
+
+
+def _project_acknowledged_alert(raw: dict) -> dict:
+    """Project a single acknowledged (history) alert to the strict read-only allow-list."""
+    job_id = raw.get("job_id")
+    if not isinstance(job_id, str) or _ALERT_ID_RE.fullmatch(job_id) is None:
+        job_id = None
+    actor = raw.get("actor")
+    if not isinstance(actor, str) or len(actor) < 1 or len(actor) > 128 or any(ord(c) < 32 for c in actor):
+        actor = None
+    return {
+        "job_id": job_id,
+        "status": raw.get("status") if isinstance(raw.get("status"), str) else None,
+        "role": raw.get("role") if isinstance(raw.get("role"), str) else None,
+        "project": raw.get("project") if isinstance(raw.get("project"), str) else None,
+        "stage": raw.get("stage") if isinstance(raw.get("stage"), str) else None,
+        "created_at": raw.get("created_at") if isinstance(raw.get("created_at"), str) else None,
+        "acknowledged_at": raw.get("acknowledged_at") if isinstance(raw.get("acknowledged_at"), str) else None,
+        "actor": actor,
     }
 
 
@@ -1107,15 +1117,15 @@ def _project_alerts(gateway_data: dict) -> dict:
     errors, filesystem paths, branches, commit SHAs, internal service URLs,
     database details, credentials, or resolution notes.
     """
-    active_raw = gateway_data.get("active_alerts")
+    active_raw = gateway_data.get("active")
     if not isinstance(active_raw, list):
         active_raw = []
-    history_raw = gateway_data.get("acknowledged_alerts")
+    history_raw = gateway_data.get("acknowledged")
     if not isinstance(history_raw, list):
         history_raw = []
-    active = [_project_alert(a) for a in active_raw if isinstance(a, dict)]
+    active = [_project_active_alert(a) for a in active_raw if isinstance(a, dict)]
     active = [a for a in active if a["job_id"] is not None]
-    history = [_project_alert(a) for a in history_raw if isinstance(a, dict)]
+    history = [_project_acknowledged_alert(a) for a in history_raw if isinstance(a, dict)]
     history = [a for a in history if a["job_id"] is not None]
     return {
         "active": active,
@@ -1133,7 +1143,7 @@ async def list_alerts(request: Request):
     async with httpx.AsyncClient(timeout=10) as client:
         try:
             response = await client.get(
-                f"{GATEWAY_URL}/v1/dashboard",
+                f"{GATEWAY_URL}/v1/alerts",
                 headers={"Authorization": f"Bearer {key}"},
             )
         except httpx.HTTPError:

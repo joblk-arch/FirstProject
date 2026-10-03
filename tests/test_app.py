@@ -4065,36 +4065,36 @@ def test_repair_state_malformed_values():
     assert app._derive_repair_state(None, None, None, None, None, None) == "none"
 
 
-# --- Alerts: _project_alert ---
+# --- Alerts: _project_active_alert ---
 
 
-def test_project_alert_valid():
+def test_project_active_alert_valid():
     raw = {
         "job_id": "abcdef123456",
-        "project": "firstproject",
         "status": "failed",
+        "role": "operator",
+        "project": "firstproject",
+        "stage": "test",
         "created_at": "2025-01-15T10:00:00Z",
-        "acknowledged": False,
-        "acknowledged_at": None,
     }
-    result = app._project_alert(raw)
+    result = app._project_active_alert(raw)
     assert result == {
         "job_id": "abcdef123456",
-        "project": "firstproject",
         "status": "failed",
+        "role": "operator",
+        "project": "firstproject",
+        "stage": "test",
         "created_at": "2025-01-15T10:00:00Z",
-        "acknowledged": False,
-        "acknowledged_at": None,
     }
 
 
-def test_project_alert_invalid_job_id():
+def test_project_active_alert_invalid_job_id():
     raw = {"job_id": "not-valid", "project": "p1", "status": "failed"}
-    result = app._project_alert(raw)
+    result = app._project_active_alert(raw)
     assert result["job_id"] is None
 
 
-def test_project_alert_never_leaks_unsafe_fields():
+def test_project_active_alert_never_leaks_unsafe_fields():
     raw = {
         "job_id": "abcdef123456",
         "project": "firstproject",
@@ -4109,7 +4109,7 @@ def test_project_alert_never_leaks_unsafe_fields():
         "resolution_note": "SECRET-NOTE",
         "error": "SECRET-ERROR",
     }
-    result = app._project_alert(raw)
+    result = app._project_active_alert(raw)
     raw_json = app.json.dumps(result)
     assert "SECRET-PROMPT" not in raw_json
     assert "/home/user/worktrees" not in raw_json
@@ -4118,7 +4118,88 @@ def test_project_alert_never_leaks_unsafe_fields():
     assert "internal:9999" not in raw_json
     assert "SECRET-NOTE" not in raw_json
     assert "SECRET-ERROR" not in raw_json
-    assert set(result.keys()) == {"job_id", "project", "status", "created_at", "acknowledged", "acknowledged_at"}
+    assert set(result.keys()) == {"job_id", "status", "role", "project", "stage", "created_at"}
+
+
+# --- Alerts: _project_acknowledged_alert ---
+
+
+def test_project_acknowledged_alert_valid():
+    raw = {
+        "job_id": "abcdef123456",
+        "status": "failed",
+        "role": "operator",
+        "project": "firstproject",
+        "stage": "test",
+        "created_at": "2025-01-15T10:00:00Z",
+        "acknowledged_at": "2025-01-15T11:00:00Z",
+        "actor": "admin",
+    }
+    result = app._project_acknowledged_alert(raw)
+    assert result == {
+        "job_id": "abcdef123456",
+        "status": "failed",
+        "role": "operator",
+        "project": "firstproject",
+        "stage": "test",
+        "created_at": "2025-01-15T10:00:00Z",
+        "acknowledged_at": "2025-01-15T11:00:00Z",
+        "actor": "admin",
+    }
+
+
+def test_project_acknowledged_alert_invalid_job_id():
+    raw = {"job_id": "not-valid", "project": "p1", "status": "failed"}
+    result = app._project_acknowledged_alert(raw)
+    assert result["job_id"] is None
+
+
+def test_project_acknowledged_alert_never_leaks_unsafe_fields():
+    raw = {
+        "job_id": "abcdef123456",
+        "project": "firstproject",
+        "status": "failed",
+        "created_at": "2025-01-15T10:00:00Z",
+        "acknowledged_at": "2025-01-15T11:00:00Z",
+        "actor": "admin",
+        "prompt": "SECRET-PROMPT",
+        "worktree": "/home/user/worktrees/secret",
+        "api_key": "sk-secret-123",
+        "branch": "main",
+        "commit_sha": "abc123def456",
+        "internal_url": "http://internal:9999",
+        "resolution_note": "SECRET-NOTE",
+        "error": "SECRET-ERROR",
+    }
+    result = app._project_acknowledged_alert(raw)
+    raw_json = app.json.dumps(result)
+    assert "SECRET-PROMPT" not in raw_json
+    assert "/home/user/worktrees" not in raw_json
+    assert "sk-secret-123" not in raw_json
+    assert "abc123def456" not in raw_json
+    assert "internal:9999" not in raw_json
+    assert "SECRET-NOTE" not in raw_json
+    assert "SECRET-ERROR" not in raw_json
+    assert set(result.keys()) == {"job_id", "status", "role", "project", "stage", "created_at", "acknowledged_at", "actor"}
+
+
+def test_project_acknowledged_alert_rejects_unsafe_actor():
+    """An actor with control characters or excessive length is set to None."""
+    raw = {
+        "job_id": "abcdef123456",
+        "status": "failed",
+        "actor": "bad\nactor",
+    }
+    result = app._project_acknowledged_alert(raw)
+    assert result["actor"] is None
+
+    raw2 = {
+        "job_id": "abcdef123456",
+        "status": "failed",
+        "actor": "a" * 129,
+    }
+    result2 = app._project_acknowledged_alert(raw2)
+    assert result2["actor"] is None
 
 
 # --- Alerts: _project_alerts ---
@@ -4131,23 +4212,24 @@ def test_project_alerts_empty():
 
 def test_project_alerts_valid():
     data = {
-        "active_alerts": [
-            {"job_id": "abcdef123456", "project": "p1", "status": "failed", "created_at": "2025-01-15T10:00:00Z"},
-            {"job_id": "111111111111", "project": "p2", "status": "blocked", "created_at": "2025-01-15T11:00:00Z"},
+        "active": [
+            {"job_id": "abcdef123456", "status": "failed", "role": "operator", "project": "p1", "stage": "test", "created_at": "2025-01-15T10:00:00Z"},
+            {"job_id": "111111111111", "status": "blocked", "role": "admin", "project": "p2", "stage": "plan", "created_at": "2025-01-15T11:00:00Z"},
         ],
-        "acknowledged_alerts": [
-            {"job_id": "222222222222", "project": "p1", "status": "failed", "created_at": "2025-01-14T10:00:00Z", "acknowledged": True, "acknowledged_at": "2025-01-15T09:00:00Z"},
+        "acknowledged": [
+            {"job_id": "222222222222", "status": "failed", "role": "operator", "project": "p1", "stage": "test", "created_at": "2025-01-14T10:00:00Z", "acknowledged_at": "2025-01-15T09:00:00Z", "actor": "admin"},
         ],
     }
     result = app._project_alerts(data)
     assert len(result["active"]) == 2
     assert len(result["history"]) == 1
-    assert result["history"][0]["acknowledged"] is True
+    assert result["history"][0]["acknowledged_at"] == "2025-01-15T09:00:00Z"
+    assert result["history"][0]["actor"] == "admin"
 
 
 def test_project_alerts_filters_invalid_ids():
     data = {
-        "active_alerts": [
+        "active": [
             {"job_id": "abcdef123456", "project": "p1", "status": "failed"},
             {"job_id": "invalid", "project": "p2", "status": "failed"},
             {"job_id": None, "project": "p3", "status": "failed"},
@@ -4160,8 +4242,8 @@ def test_project_alerts_filters_invalid_ids():
 
 def test_project_alerts_bounded_history():
     data = {
-        "acknowledged_alerts": [
-            {"job_id": f"{'a' * 12}", "project": "p1", "status": "failed", "acknowledged": True}
+        "acknowledged": [
+            {"job_id": f"{'a' * 12}", "project": "p1", "status": "failed", "acknowledged_at": "2025-01-15T09:00:00Z", "actor": "admin"}
             for _ in range(app.MAX_ALERT_HISTORY + 10)
         ],
     }
@@ -4171,7 +4253,7 @@ def test_project_alerts_bounded_history():
 
 def test_project_alerts_never_leaks_unsafe_fields():
     data = {
-        "active_alerts": [
+        "active": [
             {
                 "job_id": "abcdef123456",
                 "project": "p1",
@@ -4211,7 +4293,7 @@ def test_alerts_requires_auth(password_file, gateway_key_file):
 def test_alerts_viewer_can_read(tmp_path: Path, password_file, gateway_key_file):
     users_file = _make_multi_role_users_file(tmp_path)
     mock_client = _make_async_client_mock(
-        _make_gateway_response(200, {"active_alerts": [], "acknowledged_alerts": []})
+        _make_gateway_response(200, {"active": [], "acknowledged": []})
     )
     with patch.object(app, "USERS_FILE", users_file), \
          patch.object(app, "PASSWORD_FILE", password_file), \
@@ -4224,11 +4306,11 @@ def test_alerts_viewer_can_read(tmp_path: Path, password_file, gateway_key_file)
 
 def test_alerts_returns_safe_projections(password_file, gateway_key_file, auth_headers):
     payload = {
-        "active_alerts": [
-            {"job_id": "abcdef123456", "project": "firstproject", "status": "failed", "created_at": "2025-01-15T10:00:00Z", "prompt": "SECRET"},
+        "active": [
+            {"job_id": "abcdef123456", "status": "failed", "role": "operator", "project": "firstproject", "stage": "test", "created_at": "2025-01-15T10:00:00Z", "prompt": "SECRET"},
         ],
-        "acknowledged_alerts": [
-            {"job_id": "111111111111", "project": "p2", "status": "failed", "created_at": "2025-01-14T10:00:00Z", "acknowledged": True, "acknowledged_at": "2025-01-15T09:00:00Z"},
+        "acknowledged": [
+            {"job_id": "111111111111", "status": "failed", "role": "admin", "project": "p2", "stage": "plan", "created_at": "2025-01-14T10:00:00Z", "acknowledged_at": "2025-01-15T09:00:00Z", "actor": "admin"},
         ],
     }
     mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
@@ -4242,7 +4324,8 @@ def test_alerts_returns_safe_projections(password_file, gateway_key_file, auth_h
     assert data["active"][0]["job_id"] == "abcdef123456"
     assert "SECRET" not in response.text
     assert len(data["history"]) == 1
-    assert data["history"][0]["acknowledged"] is True
+    assert data["history"][0]["acknowledged_at"] == "2025-01-15T09:00:00Z"
+    assert data["history"][0]["actor"] == "admin"
 
 
 def test_alerts_upstream_unavailable(password_file, gateway_key_file, auth_headers):
@@ -4259,12 +4342,281 @@ def test_alerts_upstream_unavailable(password_file, gateway_key_file, auth_heade
 
 
 def test_alerts_never_leaks_gateway_key(password_file, gateway_key_file, auth_headers):
-    mock_client = _make_async_client_mock(_make_gateway_response(200, {"active_alerts": []}))
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"active": []}))
     with patch.object(app, "PASSWORD_FILE", password_file), \
          patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
          patch("app.httpx.AsyncClient", return_value=mock_client):
         response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
     assert "test-gateway-key" not in response.text
+
+
+# --- Alerts: Live gateway contract regression ---
+
+
+def _live_alerts_response():
+    """Exact shape of the deployed gateway GET /v1/alerts response."""
+    return {
+        "active": [
+            {
+                "job_id": "abcdef123456",
+                "status": "failed",
+                "role": "operator",
+                "project": "firstproject",
+                "stage": "test",
+                "created_at": "2025-01-15T10:00:00Z",
+                "prompt": "SECRET-PROMPT-CONTENT",
+                "worktree": "/home/user/worktrees/secret",
+                "api_key": "sk-secret-key-12345",
+                "branch": "main",
+                "commit_sha": "abc123def456",
+                "internal_url": "http://internal:9999",
+                "resolution_note": "SECRET-RESOLUTION-NOTE",
+                "error": "SECRET-ERROR-DETAIL",
+            },
+            {
+                "job_id": "111111111111",
+                "status": "blocked",
+                "role": "admin",
+                "project": "secondproject",
+                "stage": "plan",
+                "created_at": "2025-01-15T11:00:00Z",
+            },
+        ],
+        "acknowledged": [
+            {
+                "job_id": "222222222222",
+                "status": "failed",
+                "role": "operator",
+                "project": "firstproject",
+                "stage": "test",
+                "created_at": "2025-01-14T10:00:00Z",
+                "acknowledged_at": "2025-01-15T09:00:00Z",
+                "actor": "admin",
+                "prompt": "SECRET-PROMPT-2",
+                "worktree": "/home/user/worktrees/secret2",
+                "api_key": "sk-secret-key-2",
+                "branch": "feature-x",
+                "commit_sha": "def456abc789",
+                "internal_url": "http://internal2:8888",
+                "resolution_note": "SECRET-NOTE-2",
+                "error": "SECRET-ERROR-2",
+            },
+            {
+                "job_id": "333333333333",
+                "status": "failed",
+                "role": "admin",
+                "project": "secondproject",
+                "stage": "review",
+                "created_at": "2025-01-13T08:00:00Z",
+                "acknowledged_at": "2025-01-14T07:00:00Z",
+                "actor": "operator1",
+            },
+        ],
+    }
+
+
+def test_alerts_live_gateway_contract_regression(password_file, gateway_key_file, auth_headers):
+    """Regression: the exact live GET /v1/alerts response shape with nonempty
+    active and acknowledged arrays must produce correct nonempty projected output."""
+    mock_client = _make_async_client_mock(_make_gateway_response(200, _live_alerts_response()))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    # Active alerts: both valid entries preserved
+    assert len(data["active"]) == 2
+    assert data["active"][0]["job_id"] == "abcdef123456"
+    assert data["active"][0]["status"] == "failed"
+    assert data["active"][0]["role"] == "operator"
+    assert data["active"][0]["project"] == "firstproject"
+    assert data["active"][0]["stage"] == "test"
+    assert data["active"][0]["created_at"] == "2025-01-15T10:00:00Z"
+    assert data["active"][1]["job_id"] == "111111111111"
+    assert data["active"][1]["status"] == "blocked"
+    # History: both valid entries preserved
+    assert len(data["history"]) == 2
+    assert data["history"][0]["job_id"] == "222222222222"
+    assert data["history"][0]["acknowledged_at"] == "2025-01-15T09:00:00Z"
+    assert data["history"][0]["actor"] == "admin"
+    assert data["history"][1]["job_id"] == "333333333333"
+    assert data["history"][1]["actor"] == "operator1"
+    # No unsafe fields leak
+    text = response.text
+    assert "SECRET-PROMPT-CONTENT" not in text
+    assert "SECRET-PROMPT-2" not in text
+    assert "/home/user/worktrees" not in text
+    assert "sk-secret-key" not in text
+    assert "abc123def456" not in text
+    assert "def456abc789" not in text
+    assert "internal:9999" not in text
+    assert "internal2:8888" not in text
+    assert "SECRET-RESOLUTION-NOTE" not in text
+    assert "SECRET-NOTE-2" not in text
+    assert "SECRET-ERROR" not in text
+
+
+def test_alerts_live_gateway_contract_asserts_correct_url(password_file, gateway_key_file, auth_headers):
+    """The fixed endpoint must call GET /v1/alerts, not /v1/dashboard."""
+    mock_client = _make_async_client_mock(_make_gateway_response(200, _live_alerts_response()))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    # Verify the URL called was /v1/alerts
+    call_url = mock_client.get.await_args.args[0]
+    assert call_url.endswith("/v1/alerts"), f"Expected /v1/alerts, got {call_url}"
+    assert "/v1/dashboard" not in call_url, "Must not call /v1/dashboard for alerts"
+
+
+def test_alerts_old_dashboard_url_would_return_empty(password_file, gateway_key_file, auth_headers):
+    """Regression guard: if the code regressed to calling /v1/dashboard, the
+    gateway would return dashboard data (no 'active'/'acknowledged' keys),
+    resulting in empty arrays. This test asserts that the correct URL is used."""
+    # Simulate what would happen if /v1/dashboard were called instead:
+    # the dashboard payload has no 'active' or 'acknowledged' keys
+    dashboard_payload = {
+        "jobs": [],
+        "usage": [],
+        "counts": [],
+        "projects": [],
+        "recent_workflows": [],
+    }
+    mock_client = _make_async_client_mock(_make_gateway_response(200, dashboard_payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    # The URL must be /v1/alerts (not /v1/dashboard)
+    call_url = mock_client.get.await_args.args[0]
+    assert call_url.endswith("/v1/alerts"), (
+        f"REGRESSION: endpoint called {call_url} instead of /v1/alerts. "
+        "This would return empty arrays from the dashboard payload."
+    )
+
+
+def test_alerts_old_key_names_would_return_empty(password_file, gateway_key_file, auth_headers):
+    """Regression guard: if the code regressed to looking for 'active_alerts'/'acknowledged_alerts'
+    keys, the gateway response with 'active'/'acknowledged' keys would yield empty arrays."""
+    # The gateway returns 'active' and 'acknowledged' keys
+    gateway_payload = _live_alerts_response()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, gateway_payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    # Must be nonempty (proves the code reads 'active'/'acknowledged' not old keys)
+    assert len(data["active"]) > 0, "REGRESSION: active is empty — code may be reading old key names"
+    assert len(data["history"]) > 0, "REGRESSION: history is empty — code may be reading old key names"
+
+
+def test_alerts_malformed_entries_dropped(password_file, gateway_key_file, auth_headers):
+    """Malformed entries (non-dict, invalid job_id) are safely dropped."""
+    payload = {
+        "active": [
+            {"job_id": "abcdef123456", "status": "failed", "role": "op", "project": "p1", "stage": "test", "created_at": "2025-01-15T10:00:00Z"},
+            "not-a-dict",
+            {"job_id": "invalid-id", "status": "failed"},
+            {"status": "failed"},  # missing job_id
+            None,
+        ],
+        "acknowledged": [
+            {"job_id": "222222222222", "status": "failed", "role": "op", "project": "p1", "stage": "test", "created_at": "2025-01-14T10:00:00Z", "acknowledged_at": "2025-01-15T09:00:00Z", "actor": "admin"},
+            "not-a-dict",
+            {"job_id": "bad", "status": "failed"},
+        ],
+    }
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["active"]) == 1
+    assert data["active"][0]["job_id"] == "abcdef123456"
+    assert len(data["history"]) == 1
+    assert data["history"][0]["job_id"] == "222222222222"
+
+
+def test_alerts_bounded_history_from_live_shape(password_file, gateway_key_file, auth_headers):
+    """History is bounded to MAX_ALERT_HISTORY even with many acknowledged entries."""
+    payload = {
+        "active": [],
+        "acknowledged": [
+            {
+                "job_id": f"{'a' * 12}",
+                "status": "failed",
+                "role": "op",
+                "project": "p1",
+                "stage": "test",
+                "created_at": "2025-01-14T10:00:00Z",
+                "acknowledged_at": "2025-01-15T09:00:00Z",
+                "actor": "admin",
+            }
+            for _ in range(app.MAX_ALERT_HISTORY + 10)
+        ],
+    }
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["history"]) == app.MAX_ALERT_HISTORY
+
+
+def test_alerts_upstream_500(password_file, gateway_key_file, auth_headers):
+    """A 500 from the gateway yields a safe 502."""
+    mock_client = _make_async_client_mock(_make_gateway_response(500, {"error": "internal traceback"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Upstream gateway error"
+    assert "traceback" not in response.text
+
+
+def test_alerts_upstream_401(password_file, gateway_key_file, auth_headers):
+    """A 401 from the gateway yields a safe 502 (no key leaked)."""
+    mock_client = _make_async_client_mock(_make_gateway_response(401, {"error": "invalid key"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 502
+    assert "invalid key" not in response.text
+    assert "test-gateway-key" not in response.text
+
+
+def test_alerts_never_leaks_gateway_url(password_file, gateway_key_file, auth_headers):
+    """The internal gateway URL must never appear in the response."""
+    mock_client = _make_async_client_mock(_make_gateway_response(500, {"error": "boom"}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch.object(app, "GATEWAY_URL", "http://internal-secret:9999"), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert "internal-secret" not in response.text
+
+
+def test_alerts_bearer_token_sent_upstream(password_file, gateway_key_file, auth_headers):
+    """The gateway key is sent as Bearer header upstream but never in the response."""
+    mock_client = _make_async_client_mock(_make_gateway_response(200, {"active": [], "acknowledged": []}))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/alerts", headers=auth_headers)
+    assert response.status_code == 200
+    assert "test-gateway-key" not in response.text
+    # Verify the gateway call received the Bearer header
+    call_headers = mock_client.get.await_args.kwargs["headers"]
+    assert call_headers["Authorization"] == "Bearer test-gateway-key"
 
 
 # --- Alerts: POST /api/alerts/{job_id}/acknowledge ---
