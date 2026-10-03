@@ -1946,24 +1946,32 @@ def test_compose_telegram_uses_service_name_not_ip():
 
 
 def test_compose_no_telegram_port_published():
-    """No ports entry may publish the Telegram health port to the host or LAN."""
+    """No ports entry may publish the Telegram health port to the host or LAN.
+
+    Allowed published ports:
+    - Dashboard: 192.168.68.68:8088:8080 (LAN HTTP)
+    - Caddy proxy: 10.10.10.2:8443:8443 (private Ethernet only, for Tailscale)
+    """
     compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
-    # The only published port is the dashboard's 192.168.68.68:8088:8080
     ports_section = re.findall(r'ports:.*?(?=\n    \S|\Z)', compose, re.DOTALL)
     for block in ports_section:
-        # No port mapping should reference 8080 as a container port for telegram
-        # The dashboard publishes 8088:8080 (host:container) which is fine
         lines = [l.strip() for l in block.strip().splitlines() if l.strip().startswith("-")]
         for line in lines:
-            # Extract the port mapping
             port_match = re.search(r'"?(\S+):(\d+):(\d+)"?', line)
             if port_match:
+                host_ip = port_match.group(1)
                 host_port = port_match.group(2)
                 container_port = port_match.group(3)
-                # The only allowed published port is 8088->8080 for the dashboard
-                assert host_port == "8088" and container_port == "8080", (
+                # Allowed: dashboard on LAN (192.168.68.68:8088:8080)
+                if host_ip == "192.168.68.68" and host_port == "8088" and container_port == "8080":
+                    continue
+                # Allowed: Caddy proxy on private Ethernet (10.10.10.2:8443:8443)
+                if host_ip == "10.10.10.2" and host_port == "8443" and container_port == "8443":
+                    continue
+                assert False, (
                     f"Unexpected published port mapping: {line}. "
-                    "Only the dashboard 8088:8080 may be published."
+                    "Only the dashboard 192.168.68.68:8088:8080 and the proxy "
+                    "10.10.10.2:8443:8443 may be published."
                 )
 
 

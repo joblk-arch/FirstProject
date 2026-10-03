@@ -103,21 +103,164 @@ original client connection was HTTPS. This is determined as follows:
 
 ### Deployment Requirements
 
-- **Tailscale Serve** (recommended): The Tailscale proxy connects from the
-  Tailscale CGNAT range, so `X-Forwarded-Proto: https` is trusted and the
-  `Secure` flag is set automatically.
+- **Dedicated Caddy reverse proxy** (deployed): The `dashboard-tls-proxy`
+  service (Caddy) runs in a container on the `dashboard-tls-proxy` Docker
+  network with a fixed IP (`172.28.0.2`). It sets `X-Forwarded-Proto: https`
+  on upstream requests. The dashboard trusts this exact source IP, so the
+  `Secure` flag is set for all requests arriving via the proxy.
 
-- **Local reverse proxy** (e.g., Caddy, nginx on the same host): The proxy
-  must connect to the container from loopback (`127.0.0.1`). If the proxy
-  runs in a separate container on the Docker network, it will **not** be
-  trusted and the `Secure` flag will not be set. This is safe (the cookie
-  still works over plain HTTP on a trusted LAN) but the browser will not
-  enforce HTTPS-only cookie delivery.
+- **Tailscale CGNAT** (direct path): If Tailscale Serve connects directly to
+  the dashboard container from the CGNAT range (`100.64.0.0/10`), the
+  `X-Forwarded-Proto` header is also trusted.
 
-- **Non-Tailscale, non-loopback proxy**: The `Secure` flag will **not** be
-  set. The session still works, but the cookie is not restricted to HTTPS.
-  If you require the `Secure` flag, ensure your proxy connects from a trusted
-  address (loopback or Tailscale CGNAT).
+- **Loopback** (local proxy): A proxy on the same host connecting from
+  `127.0.0.1` or `::1` is trusted.
+
+- **Any other address**: The `Secure` flag is **not** set. The session still
+  works over plain HTTP, but the browser will not enforce HTTPS-only cookie
+  delivery.
+
+## Tailscale HTTPS Deployment
+
+### Topology
+
+```
+Remote user
+    │  HTTPS (TLS terminated by Tailscale Serve on the M5)
+    ▼
+M5 (10.10.10.1) — Tailscale Serve backend → http://10.10.10.2:8443
+    │  HTTP over direct Ethernet link
+    ▼
+M1 (10.10.10.2) — Caddy container (dashboard-tls-proxy, port 8443)
+    │  HTTP + X-Forwarded-Proto: https (via dashboard-tls-proxy Docker network)
+    ▼
+Dashboard container (172.28.0.x, port 8080)
+```
+
+- **Tailscale Serve** runs on the **M5** (the HTTPS endpoint host at
+  `10.10.10.1`). It terminates TLS and forwards plain HTTP to the backend.
+- **Caddy** runs on the **M1** (`10.10.10.2`) in a dedicated Docker container.
+  Its port 8443 is published only on the private Ethernet interface.
+- The dashboard container is reachable from Caddy via the internal
+  `dashboard-tls-proxy` Docker network (Caddy's source IP: `172.28.0.2`).
+
+### Security Boundary
+
+Three independent layers prevent LAN clients from spoofing the HTTPS trust:
+
+| Layer | Mechanism |
+|-------|-----------|
+| Interface binding | Port 8443 is published only on `10.10.10.2` (private Ethernet). LAN (`192.168.68.x`) cannot reach it. |
+| Docker network isolation | The proxy has a fixed IP (`172.28.0.2`) on a dedicated bridge network. Only the dashboard and Caddy exist on this network. |
+| Exact source-IP check | The dashboard trusts `X-Forwarded-Proto` only from `172.28.0.2`, loopback, or Tailscale CGNAT. LAN clients appearing as the Docker bridge gateway (`172.17.0.1`) are not trusted. |
+
+No shared-secret header is used. Tailscale Serve does not inject arbitrary
+headers; the `X-Forwarded-Proto: https` header is set by Caddy (via
+`header_up`), not by Tailscale.
+
+### Required Tailscale Serve Configuration Change
+
+On the **M5**, update the Tailscale Serve backend target:
+
+```
+Before: http://192.168.68.68:8088  (or whatever the previous target was)
+After:  http://10.10.10.2:8443
+```
+
+This is the only external configuration change required. No Tailscale
+configuration is stored in this repository; the change is made on the M5
+via:
+
+```bash
+tailscale serve --bg --https=8443 http://10.10.10.2:8443
+```
+
+> **Note:** The `--https` port must match the port already configured for
+> Tailscale Serve on the M5. If a different port was previously in use,
+> substitute it here (and in the backend URL if the external port differs
+> from the backend port).
+
+Verify the Serve configuration took effect:
+
+```bash
+tailscale serve status
+```
+
+Expected output shows the HTTPS handler on port 8443 proxying to
+`http://10.10.10.2:8443`.
+
+### Safe Deploy Order
+
+1. **Deploy the Caddy proxy** (from this repository, on the M1):
+   ```bash
+   docker compose up -d dashboard-tls-proxy
+   ```
+   Wait for healthy: `docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q dashboard-tls-proxy)`
+
+2. **Verify the proxy path** (from the M1):
+   ```bash
+   curl -s http://10.10.10.2:8443/health
+   # Expected: {"status":"ok"}
+   ```
+
+3. **Update Tailscale Serve on the M5** to point at `http://10.10.10.2:8443`.
+
+4. **Verify end-to-end** (from a remote device on the tailnet):
+   ```bash
+   curl -sk https://<tailscale-hostname>/health
+   # Expected: {"status":"ok"}
+   ```
+
+5. **Verify Secure cookie** (from a remote browser):
+   - Log in via the Tailscale HTTPS URL.
+   - Confirm the session cookie has the `Secure` flag (browser dev tools →
+     Application → Cookies).
+
+### Verification Commands
+
+```bash
+# Proxy is healthy (from M1):
+curl -s http://10.10.10.2:8443/health
+
+# Dashboard is healthy (from M1, LAN path):
+curl -s http://192.168.68.68:8088/health
+
+# Proxy container status:
+docker compose ps dashboard-tls-proxy
+
+# Confirm the published port is bound to the correct interface:
+ss -tlnp | grep 8443
+# Expected: 10.10.10.2:8443 (NOT 0.0.0.0:8443 or 192.168.68.x:8443)
+
+# Confirm the Docker network isolation:
+docker network inspect dashboard-tls-proxy --format '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}'
+# Expected: only dashboard-tls-proxy (172.28.0.2) and dashboard
+```
+
+### Rollback
+
+If the Tailscale HTTPS path needs to be reverted:
+
+1. **Revert Tailscale Serve on the M5** to the previous backend target
+   (e.g., `http://192.168.68.68:8088`).
+2. **Stop the Caddy proxy** (optional; it is harmless if left running):
+   ```bash
+   docker compose stop dashboard-tls-proxy
+   ```
+3. The LAN HTTP path (`192.168.68.68:8088`) is unaffected at all times.
+   Sessions over plain HTTP simply lack the `Secure` flag.
+
+To fully remove the proxy:
+```bash
+docker compose down dashboard-tls-proxy
+docker volume rm $(docker compose config --format json | python3 -c "import sys,json; print(json.load(sys.stdin)['volumes']['caddy_data']['name'])")
+docker volume rm $(docker compose config --format json | python3 -c "import sys,json; print(json.load(sys.stdin)['volumes']['caddy_config']['name'])")
+docker network rm dashboard-tls-proxy
+```
+Then remove the `dashboard-tls-proxy` service, the `dashboard-tls-proxy`
+network, the `caddy_data`/`caddy_config` volumes, and the
+`TRUSTED_PROXY_IP` environment variable from `compose.yaml`, and delete
+the `Caddyfile`.
 
 ### Session Lifecycle
 

@@ -152,12 +152,27 @@ def _cleanup_sessions_locked(now_mono: float, now_wall: float) -> None:
         del _sessions[k]
 
 
+# Fixed IP of the dedicated Caddy reverse-proxy container on the
+# dashboard-tls-proxy Docker network. This is the only non-loopback,
+# non-CGNAT address whose X-Forwarded-Proto header we trust.
+TRUSTED_PROXY_IP = os.getenv("TRUSTED_PROXY_IP", "172.28.0.2")
+
+
 def _is_trusted_proxy(host: str) -> bool:
     """Constrain which peers' X-Forwarded-Proto we trust.
 
-    Tailscale Serve proxies from loopback or the Tailscale CGNAT range (100.64.0.0/10).
+    Trusted sources:
+    - Loopback (127.0.0.1, ::1): local Tailscale Serve on the host.
+    - Tailscale CGNAT (100.64.0.0/10): direct Tailscale Serve path.
+    - TRUSTED_PROXY_IP (default 172.28.0.2): the dedicated Caddy reverse
+      proxy on the internal dashboard-tls-proxy Docker network. This is the
+      fixed source address of the proxy container; normal LAN clients
+      reaching the published port 192.168.68.68:8088 appear as the Docker
+      bridge gateway (e.g. 172.17.0.1) and are NOT trusted.
     """
     if host in ("127.0.0.1", "::1"):
+        return True
+    if host == TRUSTED_PROXY_IP:
         return True
     if host.startswith("100."):
         # Tailscale CGNAT range: 100.64.0.0/10

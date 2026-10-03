@@ -17,6 +17,7 @@ services:
       ROUTER_URL: http://router:4000
       HEALTH_CHECK_TIMEOUT: "5"
       HEALTH_CHECK_CONCURRENCY: "8"
+      TRUSTED_PROXY_IP: "172.28.0.2"
     secrets:
       - agent_gateway_key
       - dashboard_password
@@ -26,6 +27,7 @@ services:
     networks:
       - default
       - m1-agent-repo_chat
+      - dashboard-tls-proxy
     volumes:
       - /Users/jkutner/.local/share/m1-agent/dashboard-data:/data
     healthcheck:
@@ -34,9 +36,53 @@ services:
       timeout: 5s
       retries: 5
 
+  dashboard-tls-proxy:
+    image: caddy:2
+    restart: unless-stopped
+    # The Caddyfile is mounted from the project root. It listens on :8443
+    # (all container interfaces) and reverse-proxies to dashboard:8080,
+    # forcing X-Forwarded-Proto: https so the dashboard sets Secure cookies.
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Port is bound ONLY to the private direct Ethernet interface (10.10.10.2).
+    # This ensures the proxy is unreachable from the Wi-Fi/LAN (192.168.68.x).
+    # Tailscale Serve on the M5 (10.10.10.1) forwards terminated-HTTPS traffic
+    # over the direct Ethernet link to this listener.
+    ports:
+      - "10.10.10.2:8443:8443"
+    networks:
+      dashboard-tls-proxy:
+        ipv4_address: 172.28.0.2
+    # End-to-end health probe: hits Caddy's own listener on loopback, which
+    # reverse-proxies to the dashboard /health endpoint. Validates the full
+    # proxy→dashboard path, not just config syntax.
+    # Uses busybox wget (available in the caddy:2 Alpine-based image).
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://127.0.0.1:8443/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      dashboard:
+        condition: service_healthy
+
 networks:
   m1-agent-repo_chat:
     external: true
+  dashboard-tls-proxy:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+
+volumes:
+  caddy_data:
+  caddy_config:
 
 secrets:
   agent_gateway_key:
