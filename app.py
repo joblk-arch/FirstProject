@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse, HTMLResponse
 
 import asyncio
 import time
@@ -49,6 +50,209 @@ BUILD_ROLES = {"operator", "admin"}
 VALID_ROLES = {"viewer", "operator", "admin"}
 _audit_lock = threading.Lock()
 _templates_lock = threading.Lock()
+
+# --- Session store ---
+
+SESSION_IDLE_TIMEOUT = 3600  # 1 hour
+SESSION_ABSOLUTE_LIFETIME = 86400  # 24h hard cap
+MAX_SESSIONS = 1024
+SESSION_COOKIE_NAME = "dashboard_session"
+_session_lock = threading.Lock()
+_sessions: dict[str, dict] = {}
+_session_counter = 0
+_CLEANUP_INTERVAL = 64  # cleanup every N validations
+
+# Explicit allowlist of static file extensions that bypass authentication.
+# Only these extensions are served by the StaticFiles mount; anything else
+# is treated as a dynamic route requiring authentication.
+_STATIC_FILE_EXTENSIONS = frozenset({
+    "css", "js", "mjs", "json",
+    "png", "jpg", "jpeg", "gif", "svg", "ico", "webp",
+    "woff", "woff2", "ttf", "eot", "otf",
+    "map", "txt", "webmanifest",
+})
+
+
+def _hash_session_id(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def _create_session(username: str, role: str) -> str:
+    """Create a new session. Rotates: invalidates any existing session for the same user."""
+    global _session_counter
+    session_id = secrets.token_bytes(32).hex()
+    session_hash = _hash_session_id(session_id)
+    csrf_token = secrets.token_hex(32)
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    record = {
+        "session_hash": session_hash,
+        "username": username,
+        "role": role,
+        "csrf_token": csrf_token,
+        "created_at": now_mono,
+        "last_seen": now_mono,
+        "wall_created": now_wall,
+    }
+    with _session_lock:
+        # Invalidate existing sessions for this user (rotation / fixation resistance)
+        to_remove = [k for k, v in _sessions.items() if v["username"] == username]
+        for k in to_remove:
+            del _sessions[k]
+        # Enforce max sessions by evicting oldest
+        while len(_sessions) >= MAX_SESSIONS:
+            oldest_key = min(_sessions, key=lambda k: _sessions[k]["created_at"])
+            del _sessions[oldest_key]
+        _sessions[session_hash] = record
+        _session_counter += 1
+    return session_id
+
+
+def _validate_session(session_id: str) -> dict | None:
+    """Validate a session ID. Returns the session record or None if expired/missing."""
+    global _session_counter
+    session_hash = _hash_session_id(session_id)
+    with _session_lock:
+        record = _sessions.get(session_hash)
+        if record is None:
+            return None
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        # Check idle timeout
+        if now_mono - record["last_seen"] > SESSION_IDLE_TIMEOUT:
+            del _sessions[session_hash]
+            return None
+        # Check absolute lifetime
+        if now_wall - record["wall_created"] > SESSION_ABSOLUTE_LIFETIME:
+            del _sessions[session_hash]
+            return None
+        # Refresh last_seen
+        record["last_seen"] = now_mono
+        # Lazy cleanup
+        _session_counter += 1
+        if _session_counter % _CLEANUP_INTERVAL == 0:
+            _cleanup_sessions_locked(now_mono, now_wall)
+        return dict(record)
+
+
+def _destroy_session(session_id: str) -> None:
+    session_hash = _hash_session_id(session_id)
+    with _session_lock:
+        _sessions.pop(session_hash, None)
+
+
+def _cleanup_sessions_locked(now_mono: float, now_wall: float) -> None:
+    """Remove expired sessions. Caller must hold _session_lock."""
+    to_remove = [
+        k for k, v in _sessions.items()
+        if now_mono - v["last_seen"] > SESSION_IDLE_TIMEOUT
+        or now_wall - v["wall_created"] > SESSION_ABSOLUTE_LIFETIME
+    ]
+    for k in to_remove:
+        del _sessions[k]
+
+
+def _is_trusted_proxy(host: str) -> bool:
+    """Constrain which peers' X-Forwarded-Proto we trust.
+
+    Tailscale Serve proxies from loopback or the Tailscale CGNAT range (100.64.0.0/10).
+    """
+    if host in ("127.0.0.1", "::1"):
+        return True
+    if host.startswith("100."):
+        # Tailscale CGNAT range: 100.64.0.0/10
+        parts = host.split(".")
+        if len(parts) == 4:
+            try:
+                second_octet = int(parts[1])
+                if 64 <= second_octet <= 127:
+                    return True
+            except (ValueError, IndexError):
+                pass
+    return False
+
+
+def _is_trusted_https(request: Request) -> bool:
+    """Determine if the original client connection was HTTPS.
+
+    Trusts X-Forwarded-Proto only from known proxy addresses (loopback or
+    Tailscale CGNAT). Untrusted peers' forwarded headers are ignored.
+    """
+    if request.url.scheme == "https":
+        return True
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if forwarded == "https":
+        client_host = request.client.host if request.client else ""
+        if _is_trusted_proxy(client_host):
+            return True
+    return False
+
+
+def _set_session_cookie(response: Response, session_id: str, request: Request) -> None:
+    is_https = _is_trusted_https(request)
+    # max_age is exactly 3600 (1 hour) as explicitly required.
+    # The server-side sliding idle timeout (also 1h) is the primary expiration
+    # mechanism; the cookie max_age ensures the browser discards the cookie
+    # after one hour even if the user navigates away and returns.
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        session_id,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=SESSION_IDLE_TIMEOUT,
+        secure=is_https,
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+# --- Login rate limiting (simple in-memory per-IP throttle) ---
+
+LOGIN_RATE_LIMIT_MAX = 10  # max attempts per window
+LOGIN_RATE_LIMIT_WINDOW = 60  # seconds
+_login_attempts: dict[str, list[float]] = {}
+_login_rate_lock = threading.Lock()
+
+
+def _check_login_rate_limit(client_ip: str) -> bool:
+    """Return True if the request is allowed, False if rate-limited.
+
+    Also sweeps stale keys (whose newest timestamp is older than the window)
+    to bound the dictionary in long-running processes behind NATs.
+    """
+    now = time.time()
+    with _login_rate_lock:
+        # Sweep stale keys to prevent unbounded growth
+        stale_keys = [
+            ip for ip, timestamps in _login_attempts.items()
+            if timestamps and now - timestamps[-1] >= LOGIN_RATE_LIMIT_WINDOW
+        ]
+        for ip in stale_keys:
+            del _login_attempts[ip]
+
+        attempts = _login_attempts.get(client_ip, [])
+        # Prune old attempts outside the window
+        attempts = [t for t in attempts if now - t < LOGIN_RATE_LIMIT_WINDOW]
+        if len(attempts) >= LOGIN_RATE_LIMIT_MAX:
+            _login_attempts[client_ip] = attempts
+            return False
+        attempts.append(now)
+        _login_attempts[client_ip] = attempts
+        return True
+
+
+def _is_static_file_path(path: str) -> bool:
+    """Check if a path is a known static file using an explicit extension allowlist."""
+    if path.startswith("/api/"):
+        return False
+    last_segment = path.rsplit("/", 1)[-1]
+    if "." not in last_segment:
+        return False
+    ext = last_segment.rsplit(".", 1)[-1].lower()
+    return ext in _STATIC_FILE_EXTENSIONS
 
 # --- Cluster Health configuration ---
 
@@ -225,28 +429,194 @@ def _read_gateway_key() -> str:
         raise HTTPException(status_code=502, detail="Gateway credential unavailable")
 
 
+# Paths that bypass authentication entirely
+_AUTH_EXEMPT_PATHS = {"/health", "/login", "/api/login", "/api/logout"}
+
+
+# --- Login page (cached at startup to avoid per-request disk I/O) ---
+_LOGIN_PAGE_HTML: str | None = None
+
+
+def _get_login_page_html() -> str:
+    """Return the cached login page HTML, reading from disk on first use."""
+    global _LOGIN_PAGE_HTML
+    if _LOGIN_PAGE_HTML is None:
+        _LOGIN_PAGE_HTML = (Path(__file__).parent / "static" / "login.html").read_text(encoding="utf-8")
+    return _LOGIN_PAGE_HTML
+
+
+# --- Middleware ---
+# IMPORTANT: Middleware ordering is critical. Starlette's `@app.middleware("http")`
+# uses `insert(0, ...)` so the LAST decorated middleware runs FIRST in the request
+# chain. The required order (outermost → innermost) is:
+#   1. require_authentication  (sets request.state.username/role/csrf_token/auth_method)
+#   2. csrf_protection         (reads request.state.csrf_token, enforces X-CSRF-Token)
+#   3. _AcknowledgeBodyLimitMiddleware (ASGI-level, added via add_middleware)
+# Do NOT reorder these without updating the tests.
+
+
+@app.middleware("http")
+async def csrf_protection(request: Request, call_next):
+    """CSRF protection for state-changing endpoints.
+
+    Basic-auth requests bypass CSRF (documented non-cookie rule: Basic Auth
+    credentials are not ambient like cookies, so CSRF is not applicable).
+    Session-authenticated requests must present the per-session CSRF token
+    in the X-CSRF-Token header, compared in constant time.
+    """
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return await call_next(request)
+    # Auth-exempt paths (login, logout) do not require CSRF
+    if request.url.path in _AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    # Static file paths are not state-changing in practice
+    if _is_static_file_path(request.url.path):
+        return await call_next(request)
+    # Basic Auth requests bypass CSRF
+    if getattr(request.state, "auth_method", None) == "basic":
+        return await call_next(request)
+    # Session-authenticated: require X-CSRF-Token header
+    expected = getattr(request.state, "csrf_token", None)
+    if expected is None:
+        return JSONResponse(status_code=403, content={"detail": "CSRF token missing"})
+    provided = request.headers.get("x-csrf-token", "")
+    if not provided or not hmac.compare_digest(provided, expected):
+        return JSONResponse(status_code=403, content={"detail": "CSRF validation failed"})
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def require_authentication(request: Request, call_next):
-    if request.url.path == "/health":
+    """Dual-path authentication: session cookie (browser) or Basic Auth (API).
+
+    - Session cookie path: validates the opaque session ID, sets username/role/csrf_token.
+    - Basic Auth path: validates credentials directly, sets username/role, csrf_token=None.
+    - Unauthenticated browser (Accept: text/html): serves login page, no WWW-Authenticate.
+    - Unauthenticated API (Accept: application/json or no Accept): 401 JSON with WWW-Authenticate.
+    """
+    path = request.url.path
+
+    # Exempt paths
+    if path in _AUTH_EXEMPT_PATHS:
         return await call_next(request)
-    try:
-        scheme, value = request.headers.get("Authorization", "").split(" ", 1)
-        if scheme.lower() != "basic":
-            raise ValueError
-        username, password = base64.b64decode(value).decode("utf-8").split(":", 1)
-        username, role = authenticate_identity(
-            HTTPBasicCredentials(username=username, password=password)
+
+    # Static files (CSS, JS, images) are accessible without auth
+    if _is_static_file_path(path):
+        return await call_next(request)
+
+    # --- Path 1: Session cookie (browser) ---
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_id:
+        session = _validate_session(session_id)
+        if session:
+            request.state.username = session["username"]
+            request.state.role = session["role"]
+            request.state.csrf_token = session["csrf_token"]
+            request.state.auth_method = "session"
+            return await call_next(request)
+        # Expired or invalid: destroy it
+        _destroy_session(session_id)
+
+    # --- Path 2: Basic Auth (API/automation clients) ---
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Basic "):
+        try:
+            value = auth_header.split(" ", 1)[1]
+            username, password = base64.b64decode(value).decode("utf-8").split(":", 1)
+            username, role = authenticate_identity(
+                HTTPBasicCredentials(username=username, password=password)
+            )
+            request.state.username = username
+            request.state.role = role
+            request.state.csrf_token = None
+            request.state.auth_method = "basic"
+            return await call_next(request)
+        except (ValueError, UnicodeDecodeError):
+            pass
+
+    # --- Unauthenticated ---
+    accept = request.headers.get("accept", "")
+    is_browser = "text/html" in accept and "application/json" not in accept
+
+    if is_browser:
+        # Serve login page — NO WWW-Authenticate challenge
+        return await _serve_login_page(request)
+    else:
+        # JSON 401 — include WWW-Authenticate for Basic Auth API clients
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"WWW-Authenticate": 'Basic realm="Local AI Operations"'},
         )
-    except (ValueError, UnicodeDecodeError):
-        return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Local AI Operations"'})
-    request.state.username = username
-    request.state.role = role
-    return await call_next(request)
+
+
+async def _serve_login_page(request: Request) -> HTMLResponse:
+    """Serve the login page for unauthenticated browser navigation."""
+    return HTMLResponse(content=_get_login_page_html(), status_code=200)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+async def login(payload: LoginRequest, request: Request):
+    """Authenticate and create a browser session.
+
+    Uses the existing constant-time PBKDF2 password verification.
+    On success, creates a new session (rotating any existing one for the user)
+    and sets the session cookie.
+
+    Rate-limited: max 10 attempts per 60 seconds per client IP.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_login_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+
+    try:
+        username, role = authenticate_identity(
+            HTTPBasicCredentials(username=payload.username, password=payload.password)
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    session_id = _create_session(username, role)
+    response = JSONResponse({"ok": True})
+    _set_session_cookie(response, session_id, request)
+    return response
+
+
+@app.post("/api/logout")
+async def logout(request: Request):
+    """Invalidate the current session and clear the cookie."""
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_id:
+        _destroy_session(session_id)
+    response = JSONResponse({"ok": True})
+    _clear_session_cookie(response)
+    return response
 
 
 @app.get("/api/session")
 async def session(request: Request):
-    return {"username": request.state.username, "role": request.state.role}
+    """Return the current session identity and CSRF token.
+
+    For session-authenticated requests: returns username, role, and csrf_token.
+    For Basic Auth requests: returns username, role, and csrf_token=null.
+    """
+    csrf_token = getattr(request.state, "csrf_token", None)
+    return {
+        "username": request.state.username,
+        "role": request.state.role,
+        "csrf_token": csrf_token,
+    }
+
+
+@app.get("/login")
+async def login_page():
+    """Serve the login page for browser navigation."""
+    return HTMLResponse(content=_get_login_page_html())
 
 
 def _project_dashboard(raw: dict) -> dict:

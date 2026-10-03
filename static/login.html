@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Local AI Operations</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%2308121c'/%3E%3Cpath d='M16 43V29l16-10 16 10v14L32 53z' fill='none' stroke='%235eead4' stroke-width='5'/%3E%3Ccircle cx='32' cy='34' r='5' fill='%23fbbf24'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    .login-wrapper{display:grid;place-items:center;min-height:100vh;padding:20px}
+    .login-card{background:linear-gradient(145deg,#0e1c28,#0a151f);border:1px solid var(--line);border-radius:16px;padding:40px;width:min(400px,100%)}
+    .login-card h1{font-size:1.6rem;margin:0 0 8px;letter-spacing:-.03em}
+    .login-card .subtitle{color:var(--muted);font-size:.88rem;margin:0 0 28px}
+    .login-field{display:grid;gap:6px;margin-bottom:16px}
+    .login-field label{color:var(--muted);font-size:.78rem;font-weight:600}
+    .login-field input{background:#0a151f;border:1px solid var(--line);border-radius:8px;padding:12px 14px;color:var(--text);font:inherit;font-size:.92rem;width:100%}
+    .login-field input:focus{border-color:var(--teal);outline:none}
+    .login-submit{width:100%;padding:12px;background:var(--teal);border-color:var(--teal);color:#04110f;font-weight:700;font-size:.92rem;margin-top:8px}
+    .login-submit:disabled{opacity:.5;cursor:wait}
+    .login-error{color:var(--red);font-size:.84rem;margin:12px 0 0;min-height:1.2em}
+    .login-brand{display:flex;align-items:center;gap:10px;margin-bottom:24px}
+    .login-brand .mark{width:32px;height:32px;border:2px solid var(--teal);clip-path:polygon(50% 0,100% 26%,100% 75%,50% 100%,0 75%,0 26%)}
+    .login-brand div{display:grid}
+    .login-brand strong{font-size:1rem}
+    .login-brand span{color:var(--muted);font-size:.78rem}
+  </style>
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="mark"></span>
+        <div><strong>Local AI</strong><span>Operations</span></div>
+      </div>
+      <h1>Sign in</h1>
+      <p class="subtitle">Enter your credentials to access the dashboard.</p>
+      <form id="login-form" novalidate>
+        <div class="login-field">
+          <label for="login-username">Username</label>
+          <input type="text" id="login-username" name="username" required autocomplete="username" autofocus>
+        </div>
+        <div class="login-field">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" name="password" required autocomplete="current-password">
+        </div>
+        <button type="submit" class="login-submit" id="login-btn">Sign in</button>
+        <p class="login-error" id="login-error" role="alert" aria-live="polite"></p>
+      </form>
+    </div>
+  </div>
+  <script>
+    (function() {
+      const form = document.getElementById('login-form');
+      const errorEl = document.getElementById('login-error');
+      const btn = document.getElementById('login-btn');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        errorEl.textContent = '';
+        btn.disabled = true;
+        btn.textContent = 'Signing in\u2026';
+        try {
+          const username = document.getElementById('login-username').value;
+          const password = document.getElementById('login-password').value;
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, password}),
+          });
+          if (response.ok) {
+            window.location.href = '/';
+            return;
+          }
+          const data = await response.json().catch(() => ({}));
+          errorEl.textContent = data.detail || 'Invalid credentials';
+        } catch {
+          errorEl.textContent = 'Network error. Please try again.';
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Sign in';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

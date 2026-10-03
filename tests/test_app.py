@@ -299,7 +299,7 @@ def test_named_viewer_session_and_admin_action_denial(tmp_path: Path):
             headers=headers,
             json={"confirm": "0123456789"},
         )
-    assert session.json() == {"username": "reader", "role": "viewer"}
+    assert session.json() == {"username": "reader", "role": "viewer", "csrf_token": None}
     assert denied.status_code == 403
     audit = app.json.loads(audit_file.read_text(encoding="utf-8"))
     assert audit["actor"] == "reader"

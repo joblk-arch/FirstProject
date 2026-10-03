@@ -5,7 +5,7 @@ const safe = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<'
 const dialog = $('workflow-dialog');
 const workflowContent = $('workflow-content');
 let activeWorkflowId = null;
-let sessionIdentity = {username:'',role:'viewer'};
+let sessionIdentity = {username:'',role:'viewer',csrf_token:null};
 let buildKey = null;
 let buildKeyIntent = null;
 let buildInFlight = false;
@@ -115,6 +115,7 @@ async function openWorkflow(workflowId) {
   if (!dialog.open) dialog.showModal();
   try {
     const response = await fetch(`/api/workflows/${encodeURIComponent(workflowId)}`,{cache:'no-store'});
+    if (_handle401(response)) throw new Error('Session expired');
     if (!response.ok) throw new Error(response.status===404?'Workflow details are no longer available.':`Workflow detail returned ${response.status}.`);
     renderWorkflow(await response.json());
   } catch (error) {
@@ -132,7 +133,8 @@ async function runWorkflowAction(action) {
   buttons.forEach((button)=>button.disabled=true);
   if (status) status.textContent = `Running ${action}\u2026`;
   try {
-    const response = await fetch(`/api/workflows/${encodeURIComponent(activeWorkflowId)}/actions/${encodeURIComponent(action)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:activeWorkflowId})});
+    const response = await fetch(`/api/workflows/${encodeURIComponent(activeWorkflowId)}/actions/${encodeURIComponent(action)}`,{method:'POST',headers:_csrfHeaders(),body:JSON.stringify({confirm:activeWorkflowId})});
+    if (_handle401(response)) return;
     const result = await response.json().catch(()=>({}));
     if (!response.ok) throw new Error(result.detail || `Action returned ${response.status}.`);
     await openWorkflow(activeWorkflowId);
@@ -263,9 +265,10 @@ async function startBuild(event) {
     const idempotencyKey = getBuildKey(project, objective, reasoning);
     const response = await fetch('/api/workflows', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: _csrfHeaders(),
       body: JSON.stringify({project, objective, reasoning, idempotency_key: idempotencyKey}),
     });
+    if (_handle401(response)) { setBuildDisabled(false); buildInFlight = false; return; }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (response.status === 409) {
@@ -365,7 +368,8 @@ async function saveTemplate() {
     },
   };
   try {
-    const response = await fetch('/api/templates', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const response = await fetch('/api/templates', {method: 'POST', headers: _csrfHeaders(), body: JSON.stringify(body)});
+    if (_handle401(response)) return;
     if (!response.ok) {
       const result = await response.json().catch(() => ({}));
       setBuildStatus(result.detail || 'Failed to save template.', true);
@@ -386,7 +390,8 @@ async function deleteTemplate() {
   if (!project) return;
   if (!window.confirm('Delete this template?')) return;
   try {
-    const response = await fetch(`/api/templates/${encodeURIComponent(id)}?project=${encodeURIComponent(project)}`, {method: 'DELETE'});
+    const response = await fetch(`/api/templates/${encodeURIComponent(id)}?project=${encodeURIComponent(project)}`, {method: 'DELETE', headers: _csrfHeaders()});
+    if (_handle401(response)) return;
     if (!response.ok) {
       const result = await response.json().catch(() => ({}));
       setBuildStatus(result.detail || 'Failed to delete template.', true);
@@ -407,6 +412,7 @@ $('build-project').addEventListener('change', () => { loadTemplates($('build-pro
 async function loadClusterHealth() {
   try {
     const response = await fetch('/api/cluster-health', {cache: 'no-store'});
+    if (_handle401(response)) return;
     if (!response.ok) throw new Error(`Health check returned ${response.status}`);
     renderClusterHealth(await response.json());
   } catch (error) {
@@ -451,12 +457,27 @@ function renderClusterHealthError() {
 }
 
 async function load() {
-  try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
+  catch(error) { if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+}
+
+function _csrfHeaders() {
+  const h = {'Content-Type': 'application/json'};
+  if (sessionIdentity.csrf_token) h['X-CSRF-Token'] = sessionIdentity.csrf_token;
+  return h;
+}
+
+function _handle401(response) {
+  if (response.status === 401) {
+    window.location.href = '/login';
+    return true;
+  }
+  return false;
 }
 
 async function loadSession() {
   const response = await fetch('/api/session',{cache:'no-store'});
+  if (_handle401(response)) throw new Error('Session expired');
   if (!response.ok) throw new Error(`Session returned ${response.status}`);
   sessionIdentity = await response.json();
   $('identity').textContent = `${sessionIdentity.username} \u00b7 ${sessionIdentity.role}`;
@@ -474,6 +495,15 @@ async function loadSession() {
   }
 }
 
+async function logout() {
+  try {
+    await fetch('/api/logout', {method: 'POST'});
+  } catch { /* ignore */ }
+  window.location.href = '/login';
+}
+
+$('logout').addEventListener('click', logout);
+
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 $('workflows').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);const action=event.target.closest('[data-workflow-action]');if(action)runWorkflowAction(action.dataset.workflowAction);});
@@ -482,6 +512,7 @@ dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close(
 async function loadAlerts() {
   try {
     const response = await fetch('/api/alerts', {cache: 'no-store'});
+    if (_handle401(response)) return;
     if (!response.ok) throw new Error(`Alerts returned ${response.status}`);
     renderAlerts(await response.json());
   } catch (error) {
@@ -632,9 +663,10 @@ async function acknowledgeAlert(jobId, dialogEl) {
   try {
     const response = await fetch(`/api/alerts/${encodeURIComponent(jobId)}/acknowledge`, {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: _csrfHeaders(),
       body: JSON.stringify({resolution_note: trimmed, confirm: jobId}),
     });
+    if (_handle401(response)) { if (status) status.textContent = 'Session expired. Please sign in again.'; return; }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.detail || `Acknowledgment returned ${response.status}.`);
     if (status) status.textContent = 'Acknowledged.';
