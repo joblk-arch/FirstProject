@@ -285,7 +285,8 @@ def _project_dashboard(raw: dict) -> dict:
                 w_activated = result["repair_activated"]
             if w_max is None:
                 w_max = result["repair_max_attempts"]
-            w_status = w.get("overall")
+            w_status = w.get("overall") or w.get("status")
+            entry["status"] = w_status
             w_verdict = w.get("reviewer_verdict")
             if w_verdict not in {"APPROVE", "REJECT"}:
                 w_verdict = None
@@ -340,32 +341,49 @@ def _derive_repair_state(
     """Derive a safe, read-only repair state from workflow metadata.
 
     States:
-      - "none": repair not enabled/activated, or zero attempts
-      - "repairing": repair in progress (attempts > 0, < max, not yet resolved)
+      - "none": repair not enabled/activated, zero attempts, or unknown status
+      - "repairing": actively queued/running correction chain with attempts > 0
       - "ready_after_repair": reviewer approved AND workflow ready-for-approval
-      - "rejected_attempts_remaining": reviewer rejected, attempts remain
-      - "exhausted": max attempts reached without success
+      - "rejected_attempts_remaining": authoritative overall is rejected, attempts remain
+      - "exhausted": max attempts reached while workflow is still active/rejected
+      - "history": terminal workflow state with prior repair attempts (neutral label)
 
-    Never implies success until reviewer approves AND workflow is ready-for-approval.
-    Never implies merged or pushed.
+    Terminal states (merged, pushed, archived, failed, blocked, completed) never
+    display as actively repairing or falsely claim success.
+    Unknown/malformed statuses yield no badge.
     """
+    _TERMINAL = frozenset({"merged", "pushed", "archived", "failed", "blocked", "completed"})
+    _ACTIVE = frozenset({"queued", "running"})
+
     # If repair is explicitly disabled or not activated, no repair activity
     if repair_enabled is False or repair_activated is False:
         return "none"
     # If no attempts recorded, no repair activity
     if repair_attempts is None or repair_attempts == 0:
         return "none"
+    # Terminal states: show neutral history, never "repairing" or success
+    if status in _TERMINAL:
+        return "history"
+    # Unknown/malformed status: no badge
+    if status is None:
+        return "none"
     # Success: reviewer approved AND workflow is ready for human approval
     if status == "ready-for-approval" and reviewer_verdict == "APPROVE":
         return "ready_after_repair"
-    # Exhausted: max attempts reached without success
+    # Ready-for-approval without APPROVE: cannot confirm success, no badge
+    if status == "ready-for-approval":
+        return "none"
+    # Exhausted: max attempts reached while workflow is still active or rejected
     if repair_max_attempts is not None and repair_attempts >= repair_max_attempts:
         return "exhausted"
-    # Rejected with attempts remaining
-    if reviewer_verdict == "REJECT" and (repair_max_attempts is None or repair_attempts < repair_max_attempts):
+    # Rejected: only when the authoritative overall state is "rejected"
+    if status == "rejected":
         return "rejected_attempts_remaining"
-    # In progress
-    return "repairing"
+    # Active: only for genuinely queued/running correction chains
+    if status in _ACTIVE:
+        return "repairing"
+    # Any other unrecognized state: no badge
+    return "none"
 
 
 def _project_stage(raw: dict) -> dict:

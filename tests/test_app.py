@@ -411,7 +411,7 @@ def test_frontend_js_renders_recent_workflows():
     js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
     assert "recent_workflows" in js
     assert "w.objective" in js
-    assert "w.overall" in js
+    assert "w.status" in js
     assert "stage_counts" in js
     assert "created_at" in js
     assert "data-workflow-id" in js
@@ -3447,31 +3447,31 @@ def test_derive_repair_state_ready_after_repair_at_max():
 
 
 def test_derive_repair_state_exhausted():
-    assert app._derive_repair_state(True, True, 3, 3, "failed", None) == "exhausted"
+    assert app._derive_repair_state(True, True, 3, 3, "running", None) == "exhausted"
 
 
 def test_derive_repair_state_exhausted_over_max():
-    assert app._derive_repair_state(True, True, 5, 3, "failed", None) == "exhausted"
+    assert app._derive_repair_state(True, True, 5, 3, "running", None) == "exhausted"
 
 
 def test_derive_repair_state_exhausted_with_reject():
-    """At max with REJECT verdict: exhausted (not rejected_attempts_remaining)."""
-    assert app._derive_repair_state(True, True, 3, 3, "failed", "REJECT") == "exhausted"
+    """At max with rejected status: exhausted (not rejected_attempts_remaining)."""
+    assert app._derive_repair_state(True, True, 3, 3, "rejected", "REJECT") == "exhausted"
 
 
 def test_derive_repair_state_rejected_attempts_remaining():
-    assert app._derive_repair_state(True, True, 1, 3, "running", "REJECT") == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 1, 3, "rejected", None) == "rejected_attempts_remaining"
 
 
 def test_derive_repair_state_rejected_attempts_remaining_at_boundary():
-    """Attempts < max with REJECT: rejected_attempts_remaining."""
-    assert app._derive_repair_state(True, True, 2, 3, "running", "REJECT") == "rejected_attempts_remaining"
+    """Attempts < max with rejected status: rejected_attempts_remaining."""
+    assert app._derive_repair_state(True, True, 2, 3, "rejected", None) == "rejected_attempts_remaining"
 
 
 def test_derive_repair_state_never_ready_without_approval():
     """Never imply success without reviewer approval."""
-    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", None) == "repairing"
-    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", "REJECT") == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", None) == "none"
+    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", "REJECT") == "none"
 
 
 def test_derive_repair_state_never_ready_without_ready_status():
@@ -3485,13 +3485,53 @@ def test_derive_repair_state_missing_max_defaults_to_repairing():
 
 
 def test_derive_repair_state_missing_max_with_reject():
-    """If max is None and reviewer rejected, it's rejected_attempts_remaining (can't determine exhaustion)."""
-    assert app._derive_repair_state(True, True, 2, None, "running", "REJECT") == "rejected_attempts_remaining"
+    """If max is None and status is running, it's repairing (verdict alone doesn't change state)."""
+    assert app._derive_repair_state(True, True, 2, None, "running", "REJECT") == "repairing"
 
 
 def test_derive_repair_state_missing_max_with_approval_and_ready():
     """If max is None but reviewer approved and ready, it's ready_after_repair."""
     assert app._derive_repair_state(True, True, 2, None, "ready-for-approval", "APPROVE") == "ready_after_repair"
+
+
+def test_derive_repair_state_terminal_merged():
+    """Terminal merged status with attempts → neutral history, never repairing/success."""
+    assert app._derive_repair_state(True, True, 1, None, "merged", None) == "history"
+    assert app._derive_repair_state(True, True, 3, 5, "merged", "APPROVE") == "history"
+
+
+def test_derive_repair_state_terminal_failed():
+    assert app._derive_repair_state(True, True, 2, 5, "failed", None) == "history"
+
+
+def test_derive_repair_state_terminal_pushed():
+    assert app._derive_repair_state(True, True, 1, 3, "pushed", None) == "history"
+
+
+def test_derive_repair_state_terminal_archived():
+    assert app._derive_repair_state(True, True, 1, 3, "archived", None) == "history"
+
+
+def test_derive_repair_state_terminal_blocked():
+    assert app._derive_repair_state(True, True, 1, 3, "blocked", None) == "history"
+
+
+def test_derive_repair_state_terminal_completed():
+    assert app._derive_repair_state(True, True, 1, 3, "completed", None) == "history"
+
+
+def test_derive_repair_state_terminal_never_repairing_or_success():
+    """No terminal state may display as actively repairing or falsely claim success."""
+    for status in ("merged", "pushed", "archived", "failed", "blocked", "completed"):
+        for verdict in (None, "APPROVE", "REJECT"):
+            result = app._derive_repair_state(True, True, 1, 3, status, verdict)
+            assert result == "history", f"{status}/{verdict} → {result}, expected history"
+
+
+def test_derive_repair_state_queued():
+    """Queued with attempts > 0 → actively repairing (genuinely active chain)."""
+    assert app._derive_repair_state(True, True, 1, 3, "queued", None) == "repairing"
+    assert app._derive_repair_state(True, True, 2, 5, "queued", None) == "repairing"
 
 
 # --- Repair visibility: _project_workflow with repair fields ---
@@ -3603,7 +3643,7 @@ def test_project_workflow_repair_reject_state(password_file, gateway_key_file, a
     payload = _gateway_payload_with_repair(
         repair_attempts=1, repair_max_attempts=3,
     )
-    payload["workflow"]["overall"] = "running"
+    payload["workflow"]["overall"] = "rejected"
     payload["reviewer_verdict"] = "REJECT"
     mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
     with patch.object(app, "PASSWORD_FILE", password_file), \
@@ -3618,7 +3658,7 @@ def test_project_workflow_repair_exhausted_state(password_file, gateway_key_file
     payload = _gateway_payload_with_repair(
         repair_attempts=3, repair_max_attempts=3,
     )
-    payload["workflow"]["overall"] = "failed"
+    payload["workflow"]["overall"] = "running"
     payload["reviewer_verdict"] = "REJECT"
     mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
     with patch.object(app, "PASSWORD_FILE", password_file), \
@@ -3780,7 +3820,7 @@ def test_dashboard_repair_state_ready_after_repair(password_file, gateway_key_fi
 
 def test_dashboard_repair_state_exhausted(password_file, gateway_key_file, auth_headers):
     payload = _dashboard_payload_with_repair()
-    payload["recent_workflows"][0]["overall"] = "failed"
+    payload["recent_workflows"][0]["overall"] = "running"
     payload["recent_workflows"][0]["repair_attempts"] = 3
     payload["recent_workflows"][0]["repair_max_attempts"] = 3
     mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
@@ -3794,6 +3834,7 @@ def test_dashboard_repair_state_exhausted(password_file, gateway_key_file, auth_
 
 def test_dashboard_repair_state_rejected(password_file, gateway_key_file, auth_headers):
     payload = _dashboard_payload_with_repair()
+    payload["recent_workflows"][0]["overall"] = "rejected"
     payload["recent_workflows"][0]["reviewer_verdict"] = "REJECT"
     payload["recent_workflows"][0]["repair_attempts"] = 1
     mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
@@ -3814,6 +3855,42 @@ def test_dashboard_non_dict_response_passthrough(password_file, gateway_key_file
         response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
     assert response.status_code == 200
     assert response.json() == ["not", "a", "dict"]
+
+
+def test_dashboard_live_payload_merged_regression(password_file, gateway_key_file, auth_headers):
+    """Regression: the exact live gateway payload that triggered the bug.
+
+    overall=merged, repair_attempts=1, no repair_max_attempts, no reviewer_verdict.
+    The workflow must show neutral 'history', never 'repairing' or success.
+    """
+    payload = _dashboard_payload()
+    # System-level repair fields as in the live gateway
+    payload["repair_enabled"] = True
+    payload["repair_activated"] = True
+    # No system-level repair_max_attempts (missing in live payload)
+    # Per-workflow: the exact live regression payload
+    wf = payload["recent_workflows"][0]
+    wf["overall"] = "merged"
+    wf["repair_attempts"] = 1
+    # No repair_max_attempts, no reviewer_verdict (missing in live payload)
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    wf_result = data["recent_workflows"][0]
+    # The core regression: merged must never show as repairing
+    assert wf_result["repair_state"] == "history"
+    assert wf_result["repair_state"] != "repairing"
+    assert wf_result["repair_state"] != "ready_after_repair"
+    # Status is normalized from overall
+    assert wf_result["status"] == "merged"
+    # repair_attempts is preserved
+    assert wf_result["repair_attempts"] == 1
+    # No max → no /max claims
+    assert wf_result.get("repair_max_attempts") is None
 
 
 # --- Repair visibility: Frontend source contracts ---
@@ -3888,6 +3965,7 @@ def test_frontend_css_has_repair_badge_styles():
     assert ".repair-ready-after-repair" in css
     assert ".repair-rejected-attempts-remaining" in css
     assert ".repair-exhausted" in css
+    assert ".repair-history" in css
     assert ".repair-system" in css
     assert ".repair-active" in css
     assert ".repair-enabled" in css
@@ -3961,15 +4039,15 @@ def test_repair_state_successful_repair():
 
 
 def test_repair_state_repeated_rejection():
-    assert app._derive_repair_state(True, True, 1, 5, "running", "REJECT") == "rejected_attempts_remaining"
-    assert app._derive_repair_state(True, True, 2, 5, "running", "REJECT") == "rejected_attempts_remaining"
-    assert app._derive_repair_state(True, True, 4, 5, "running", "REJECT") == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 1, 5, "rejected", None) == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 2, 5, "rejected", None) == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 4, 5, "rejected", None) == "rejected_attempts_remaining"
 
 
 def test_repair_state_exhausted():
-    assert app._derive_repair_state(True, True, 3, 3, "failed", "REJECT") == "exhausted"
-    assert app._derive_repair_state(True, True, 5, 3, "failed", None) == "exhausted"
-    assert app._derive_repair_state(True, True, 3, 3, "running", None) == "exhausted"
+    assert app._derive_repair_state(True, True, 3, 3, "running", "REJECT") == "exhausted"
+    assert app._derive_repair_state(True, True, 5, 3, "running", None) == "exhausted"
+    assert app._derive_repair_state(True, True, 3, 3, "rejected", None) == "exhausted"
 
 
 def test_repair_state_disabled():

@@ -22,6 +22,8 @@ function repairBadge(state, attempts, max) {
     label = attempts != null && max != null ? `Rejected, ${max - attempts} attempt${max - attempts !== 1 ? 's' : ''} left` : 'Rejected, attempts remaining';
   } else if (state === 'exhausted') {
     label = max != null ? `Exhausted at ${max}` : 'Exhausted';
+  } else if (state === 'history') {
+    label = attempts != null ? `${attempts} repair${attempts !== 1 ? 's' : ''} used` : 'Repair history';
   } else {
     label = safe(state);
   }
@@ -57,7 +59,7 @@ function render(data) {
   $('workflows').innerHTML = sorted.length ? sorted.map((w) => {
     const id = w.id ? safe(w.id) : '';
     const objective = w.objective != null ? safe(w.objective) : '\u2014';
-    const status = w.overall != null ? safe(w.overall) : 'unknown';
+    const status = w.status != null ? safe(w.status) : 'unknown';
     const repair = repairBadge(w.repair_state, w.repair_attempts, w.repair_max_attempts);
     const origin = w.origin != null ? safe(w.origin) : '\u2014';
     const models = Array.isArray(w.models) ? w.models.map((m) => safe(m)).join(', ') : (w.models != null ? safe(w.models) : '\u2014');
