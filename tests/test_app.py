@@ -136,6 +136,8 @@ def test_workflow_detail_projects_live_contract(password_file, gateway_key_file,
     assert set(data) == {
         "id", "objective", "project", "status", "elapsed_seconds", "stages",
         "tester_evidence", "reviewer_verdict", "diff",
+        "repair_enabled", "repair_activated", "repair_attempts",
+        "repair_max_attempts", "repair_state",
     }
     assert data["status"] == "ready-for-approval"
     assert data["reviewer_verdict"] == "APPROVE"
@@ -3337,3 +3339,649 @@ def test_frontend_css_cluster_health_responsive():
     assert ".health-overall.status.degraded" in css
     assert ".health-overall.status.offline" in css
     assert ".health-overall.status.unknown" in css
+
+
+# --- Repair visibility: _safe_bool and _safe_nonneg_int ---
+
+
+def test_safe_bool_true():
+    assert app._safe_bool(True) is True
+
+
+def test_safe_bool_false():
+    assert app._safe_bool(False) is False
+
+
+def test_safe_bool_none():
+    assert app._safe_bool(None) is None
+
+
+def test_safe_bool_rejects_int():
+    assert app._safe_bool(1) is None
+    assert app._safe_bool(0) is None
+
+
+def test_safe_bool_rejects_string():
+    assert app._safe_bool("true") is None
+    assert app._safe_bool("false") is None
+    assert app._safe_bool("") is None
+
+
+def test_safe_bool_rejects_float():
+    assert app._safe_bool(1.0) is None
+
+
+def test_safe_nonneg_int_zero():
+    assert app._safe_nonneg_int(0) == 0
+
+
+def test_safe_nonneg_int_positive():
+    assert app._safe_nonneg_int(5) == 5
+    assert app._safe_nonneg_int(100) == 100
+
+
+def test_safe_nonneg_int_none():
+    assert app._safe_nonneg_int(None) is None
+
+
+def test_safe_nonneg_int_rejects_negative():
+    assert app._safe_nonneg_int(-1) is None
+    assert app._safe_nonneg_int(-100) is None
+
+
+def test_safe_nonneg_int_rejects_bool():
+    assert app._safe_nonneg_int(True) is None
+    assert app._safe_nonneg_int(False) is None
+
+
+def test_safe_nonneg_int_rejects_float():
+    assert app._safe_nonneg_int(1.5) is None
+    assert app._safe_nonneg_int(0.0) is None
+
+
+def test_safe_nonneg_int_rejects_string():
+    assert app._safe_nonneg_int("5") is None
+    assert app._safe_nonneg_int("") is None
+
+
+# --- Repair visibility: _derive_repair_state ---
+
+
+def test_derive_repair_state_none_when_disabled():
+    assert app._derive_repair_state(False, True, 3, 5, "running", None) == "none"
+
+
+def test_derive_repair_state_none_when_not_activated():
+    assert app._derive_repair_state(True, False, 3, 5, "running", None) == "none"
+
+
+def test_derive_repair_state_none_when_zero_attempts():
+    assert app._derive_repair_state(True, True, 0, 5, "running", None) == "none"
+
+
+def test_derive_repair_state_none_when_missing_attempts():
+    assert app._derive_repair_state(True, True, None, 5, "running", None) == "none"
+
+
+def test_derive_repair_state_none_when_missing_enabled():
+    """Missing enabled (None) is treated as not explicitly disabled, so we check activated."""
+    # If enabled is None (missing) and activated is True, we proceed
+    assert app._derive_repair_state(None, True, 0, 5, "running", None) == "none"
+
+
+def test_derive_repair_state_repairing():
+    assert app._derive_repair_state(True, True, 1, 3, "running", None) == "repairing"
+
+
+def test_derive_repair_state_repairing_multiple_attempts():
+    assert app._derive_repair_state(True, True, 2, 5, "running", None) == "repairing"
+
+
+def test_derive_repair_state_ready_after_repair():
+    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", "APPROVE") == "ready_after_repair"
+
+
+def test_derive_repair_state_ready_after_repair_at_max():
+    """Even at max attempts, if reviewer approved and ready, it's ready_after_repair."""
+    assert app._derive_repair_state(True, True, 3, 3, "ready-for-approval", "APPROVE") == "ready_after_repair"
+
+
+def test_derive_repair_state_exhausted():
+    assert app._derive_repair_state(True, True, 3, 3, "failed", None) == "exhausted"
+
+
+def test_derive_repair_state_exhausted_over_max():
+    assert app._derive_repair_state(True, True, 5, 3, "failed", None) == "exhausted"
+
+
+def test_derive_repair_state_exhausted_with_reject():
+    """At max with REJECT verdict: exhausted (not rejected_attempts_remaining)."""
+    assert app._derive_repair_state(True, True, 3, 3, "failed", "REJECT") == "exhausted"
+
+
+def test_derive_repair_state_rejected_attempts_remaining():
+    assert app._derive_repair_state(True, True, 1, 3, "running", "REJECT") == "rejected_attempts_remaining"
+
+
+def test_derive_repair_state_rejected_attempts_remaining_at_boundary():
+    """Attempts < max with REJECT: rejected_attempts_remaining."""
+    assert app._derive_repair_state(True, True, 2, 3, "running", "REJECT") == "rejected_attempts_remaining"
+
+
+def test_derive_repair_state_never_ready_without_approval():
+    """Never imply success without reviewer approval."""
+    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", None) == "repairing"
+    assert app._derive_repair_state(True, True, 2, 5, "ready-for-approval", "REJECT") == "rejected_attempts_remaining"
+
+
+def test_derive_repair_state_never_ready_without_ready_status():
+    """Never imply success without ready-for-approval status."""
+    assert app._derive_repair_state(True, True, 2, 5, "running", "APPROVE") == "repairing"
+
+
+def test_derive_repair_state_missing_max_defaults_to_repairing():
+    """If max is None (missing), attempts > 0 with no reject means repairing."""
+    assert app._derive_repair_state(True, True, 2, None, "running", None) == "repairing"
+
+
+def test_derive_repair_state_missing_max_with_reject():
+    """If max is None and reviewer rejected, it's rejected_attempts_remaining (can't determine exhaustion)."""
+    assert app._derive_repair_state(True, True, 2, None, "running", "REJECT") == "rejected_attempts_remaining"
+
+
+def test_derive_repair_state_missing_max_with_approval_and_ready():
+    """If max is None but reviewer approved and ready, it's ready_after_repair."""
+    assert app._derive_repair_state(True, True, 2, None, "ready-for-approval", "APPROVE") == "ready_after_repair"
+
+
+# --- Repair visibility: _project_workflow with repair fields ---
+
+
+def _gateway_payload_with_repair(**overrides):
+    payload = _gateway_payload()
+    payload.update({
+        "repair_enabled": True,
+        "repair_activated": True,
+        "repair_attempts": 2,
+        "repair_max_attempts": 3,
+    })
+    payload.update(overrides)
+    return payload
+
+
+def test_project_workflow_with_repair_fields(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["repair_enabled"] is True
+    assert data["repair_activated"] is True
+    assert data["repair_attempts"] == 2
+    assert data["repair_max_attempts"] == 3
+    # Status is ready-for-approval and verdict is APPROVE → ready_after_repair
+    assert data["repair_state"] == "ready_after_repair"
+
+
+def test_project_workflow_repair_disabled(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair(repair_enabled=False)
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_enabled"] is False
+    assert data["repair_state"] == "none"
+
+
+def test_project_workflow_repair_not_activated(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair(repair_activated=False)
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_activated"] is False
+    assert data["repair_state"] == "none"
+
+
+def test_project_workflow_repair_zero_attempts(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair(repair_attempts=0)
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_attempts"] == 0
+    assert data["repair_state"] == "none"
+
+
+def test_project_workflow_repair_missing_fields(password_file, gateway_key_file, auth_headers):
+    """Legacy payload without repair fields: all None, state none."""
+    payload = _gateway_payload()
+    # No repair fields at all
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_enabled"] is None
+    assert data["repair_activated"] is None
+    assert data["repair_attempts"] is None
+    assert data["repair_max_attempts"] is None
+    assert data["repair_state"] == "none"
+
+
+def test_project_workflow_repair_malformed_values(password_file, gateway_key_file, auth_headers):
+    """Malformed repair values are safely handled as None."""
+    payload = _gateway_payload()
+    payload["repair_enabled"] = "yes"  # not a bool
+    payload["repair_activated"] = 1  # not a bool
+    payload["repair_attempts"] = -5  # negative
+    payload["repair_max_attempts"] = "three"  # not an int
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_enabled"] is None
+    assert data["repair_activated"] is None
+    assert data["repair_attempts"] is None
+    assert data["repair_max_attempts"] is None
+    assert data["repair_state"] == "none"
+
+
+def test_project_workflow_repair_reject_state(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair(
+        repair_attempts=1, repair_max_attempts=3,
+    )
+    payload["workflow"]["overall"] = "running"
+    payload["reviewer_verdict"] = "REJECT"
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_state"] == "rejected_attempts_remaining"
+
+
+def test_project_workflow_repair_exhausted_state(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair(
+        repair_attempts=3, repair_max_attempts=3,
+    )
+    payload["workflow"]["overall"] = "failed"
+    payload["reviewer_verdict"] = "REJECT"
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_state"] == "exhausted"
+
+
+def test_project_workflow_repair_repairing_state(password_file, gateway_key_file, auth_headers):
+    payload = _gateway_payload_with_repair(
+        repair_attempts=1, repair_max_attempts=3,
+    )
+    payload["workflow"]["overall"] = "running"
+    payload["reviewer_verdict"] = None
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    data = response.json()
+    assert data["repair_state"] == "repairing"
+
+
+def test_project_workflow_never_leaks_unsafe_repair_fields(password_file, gateway_key_file, auth_headers):
+    """Unsafe fields in the repair section must not leak through."""
+    payload = _gateway_payload_with_repair()
+    payload["repair_prompt"] = "SECRET-REPAIR-PROMPT"
+    payload["repair_worktree"] = "/home/user/worktrees/secret"
+    payload["repair_api_key"] = "sk-secret-123"
+    payload["repair_internal_url"] = "http://internal:9999"
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/workflows/0123456789", headers=auth_headers)
+    text = response.text
+    assert "SECRET-REPAIR-PROMPT" not in text
+    assert "/home/user/worktrees" not in text
+    assert "sk-secret-123" not in text
+    assert "internal:9999" not in text
+
+
+# --- Repair visibility: _project_dashboard ---
+
+
+def _dashboard_payload_with_repair():
+    payload = _dashboard_payload()
+    payload["repair_enabled"] = True
+    payload["repair_activated"] = True
+    payload["repair_max_attempts"] = 3
+    payload["recent_workflows"][0]["repair_activated"] = True
+    payload["recent_workflows"][0]["repair_attempts"] = 1
+    payload["recent_workflows"][0]["repair_max_attempts"] = 3
+    return payload
+
+
+def test_dashboard_adds_system_repair_fields(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload_with_repair()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["repair_enabled"] is True
+    assert data["repair_activated"] is True
+    assert data["repair_max_attempts"] == 3
+
+
+def test_dashboard_adds_repair_state_to_workflows(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload_with_repair()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    data = response.json()
+    wf = data["recent_workflows"][0]
+    assert "repair_state" in wf
+    # overall is "running", attempts=1, max=3, no verdict → repairing
+    assert wf["repair_state"] == "repairing"
+
+
+def test_dashboard_legacy_payload_no_repair_fields(password_file, gateway_key_file, auth_headers):
+    """Legacy gateway payload without repair fields: system fields None, state none."""
+    payload = _dashboard_payload()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["repair_enabled"] is None
+    assert data["repair_activated"] is None
+    assert data["repair_max_attempts"] is None
+    wf = data["recent_workflows"][0]
+    assert wf["repair_state"] == "none"
+
+
+def test_dashboard_malformed_repair_fields(password_file, gateway_key_file, auth_headers):
+    """Malformed system-level repair fields are safely handled."""
+    payload = _dashboard_payload()
+    payload["repair_enabled"] = "yes"
+    payload["repair_activated"] = 1
+    payload["repair_max_attempts"] = -1
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    data = response.json()
+    assert data["repair_enabled"] is None
+    assert data["repair_activated"] is None
+    assert data["repair_max_attempts"] is None
+    assert data["recent_workflows"][0]["repair_state"] == "none"
+
+
+def test_dashboard_preserves_existing_fields(password_file, gateway_key_file, auth_headers):
+    """The dashboard projection preserves all existing fields."""
+    payload = _dashboard_payload_with_repair()
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    data = response.json()
+    # All original fields preserved
+    assert data["jobs"] == payload["jobs"]
+    assert data["usage"] == payload["usage"]
+    assert data["counts"] == payload["counts"]
+    assert data["projects"] == payload["projects"]
+    assert data["generated_at"] == payload["generated_at"]
+    # Workflow fields preserved
+    wf = data["recent_workflows"][0]
+    assert wf["id"] == "0123456789"
+    assert wf["objective"] == "Build feature X"
+    assert wf["overall"] == "running"
+    assert wf["origin"] == "telegram"
+    assert wf["models"] == ["local-model"]
+
+
+def test_dashboard_repair_state_ready_after_repair(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload_with_repair()
+    payload["recent_workflows"][0]["overall"] = "ready-for-approval"
+    payload["recent_workflows"][0]["reviewer_verdict"] = "APPROVE"
+    payload["recent_workflows"][0]["repair_attempts"] = 2
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    data = response.json()
+    assert data["recent_workflows"][0]["repair_state"] == "ready_after_repair"
+
+
+def test_dashboard_repair_state_exhausted(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload_with_repair()
+    payload["recent_workflows"][0]["overall"] = "failed"
+    payload["recent_workflows"][0]["repair_attempts"] = 3
+    payload["recent_workflows"][0]["repair_max_attempts"] = 3
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    data = response.json()
+    assert data["recent_workflows"][0]["repair_state"] == "exhausted"
+
+
+def test_dashboard_repair_state_rejected(password_file, gateway_key_file, auth_headers):
+    payload = _dashboard_payload_with_repair()
+    payload["recent_workflows"][0]["reviewer_verdict"] = "REJECT"
+    payload["recent_workflows"][0]["repair_attempts"] = 1
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    data = response.json()
+    assert data["recent_workflows"][0]["repair_state"] == "rejected_attempts_remaining"
+
+
+def test_dashboard_non_dict_response_passthrough(password_file, gateway_key_file, auth_headers):
+    """If the gateway returns a non-dict (e.g., a list), it's passed through as-is."""
+    mock_client = _make_async_client_mock(_make_gateway_response(200, ["not", "a", "dict"]))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == ["not", "a", "dict"]
+
+
+# --- Repair visibility: Frontend source contracts ---
+
+
+def test_frontend_js_has_repair_badge_function():
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function repairBadge(" in js
+    assert "repair-badge" in js
+    assert "repair-none" in js
+    # The class is constructed dynamically: repair-${state.replace(/_/g, '-')}
+    assert "repair-${state.replace(/_/g, '-')}" in js
+    # All state values must appear in the if/else chain
+    assert "'repairing'" in js
+    assert "'ready_after_repair'" in js
+    assert "'rejected_attempts_remaining'" in js
+    assert "'exhausted'" in js
+
+
+def test_frontend_js_repair_badge_uses_safe():
+    """All dynamic text in repairBadge must use safe() for HTML escaping."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function repairBadge\(.*?\n\}", js, re.DOTALL)
+    assert match is not None, "repairBadge function not found"
+    body = match.group(0)
+    assert "safe(label)" in body
+    assert "safe(state)" in body
+
+
+def test_frontend_js_repair_badge_handles_none():
+    """repairBadge returns a neutral indicator for 'none' or missing state."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function repairBadge\(.*?\n\}", js, re.DOTALL)
+    assert match is not None
+    body = match.group(0)
+    assert "state === 'none'" in body
+    assert "repair-none" in body
+
+
+def test_frontend_js_renders_repair_in_workflows_table():
+    """The workflows table rendering must include the repair badge."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "repairBadge(w.repair_state" in js
+
+
+def test_frontend_js_renders_repair_in_workflow_detail():
+    """The workflow detail must include the repair badge."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "repairBadge(workflow.repair_state" in js
+
+
+def test_frontend_js_system_repair_indicator():
+    """The metrics area must include a system-level repair indicator."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "repair_enabled" in js
+    assert "repair_activated" in js
+    assert "repair_max_attempts" in js
+    assert "Auto-repair" in js
+    assert "repair-system" in js
+
+
+def test_frontend_html_has_repair_column():
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert "Repair" in html
+
+
+def test_frontend_css_has_repair_badge_styles():
+    css = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    assert ".repair-badge" in css
+    assert ".repair-none" in css
+    assert ".repair-repairing" in css
+    assert ".repair-ready-after-repair" in css
+    assert ".repair-rejected-attempts-remaining" in css
+    assert ".repair-exhausted" in css
+    assert ".repair-system" in css
+    assert ".repair-active" in css
+    assert ".repair-enabled" in css
+    assert ".repair-off" in css
+
+
+def test_frontend_css_repair_colors_match_status_palette():
+    """Repair badge colors use the same CSS variables as status indicators."""
+    css = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    # Teal for success (ready_after_repair, active)
+    assert "var(--teal)" in css
+    # Amber for in-progress (repairing, enabled)
+    assert "var(--amber)" in css
+    # Red for failure (exhausted, rejected)
+    assert "var(--red)" in css
+    # Muted for none/off
+    assert "var(--muted)" in css
+
+
+# --- Repair visibility: Regression — no new controls ---
+
+
+def test_no_repair_controls_in_workflow_actions():
+    """The workflowActions function must not add any repair-related buttons."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function workflowActions\(.*?\n\}", js, re.DOTALL)
+    assert match is not None
+    body = match.group(0)
+    # No repair action buttons
+    assert "repair" not in body.lower() or "data-workflow-action" not in body
+
+
+def test_no_repair_in_workflow_action_endpoint():
+    """The backend WORKFLOW_ACTIONS set must not include 'repair'."""
+    assert "repair" not in app.WORKFLOW_ACTIONS
+
+
+def test_manual_approval_gates_preserved():
+    """The existing action roles must be unchanged."""
+    assert app.ACTION_ROLES["approve"] == {"admin"}
+    assert app.ACTION_ROLES["merge"] == {"admin"}
+    assert app.ACTION_ROLES["push"] == {"admin"}
+    assert app.ACTION_ROLES["retry"] == {"operator", "admin"}
+    assert app.ACTION_ROLES["rereview"] == {"operator", "admin"}
+
+
+def test_repair_is_read_only_no_mutation_endpoint():
+    """There must be no POST/PUT/DELETE endpoint for repair."""
+    # Check that no route with 'repair' in the path exists
+    routes = [r.path for r in app.app.routes]
+    repair_routes = [r for r in routes if "repair" in r.lower()]
+    assert repair_routes == [], f"Unexpected repair mutation routes: {repair_routes}"
+
+
+# --- Repair visibility: Comprehensive state coverage ---
+
+
+def test_repair_state_zero_attempts_is_none():
+    assert app._derive_repair_state(True, True, 0, 5, "running", None) == "none"
+    assert app._derive_repair_state(True, True, 0, 5, "ready-for-approval", "APPROVE") == "none"
+
+
+def test_repair_state_active_repair():
+    assert app._derive_repair_state(True, True, 1, 3, "running", None) == "repairing"
+    assert app._derive_repair_state(True, True, 2, 5, "running", None) == "repairing"
+
+
+def test_repair_state_successful_repair():
+    assert app._derive_repair_state(True, True, 1, 5, "ready-for-approval", "APPROVE") == "ready_after_repair"
+    assert app._derive_repair_state(True, True, 3, 3, "ready-for-approval", "APPROVE") == "ready_after_repair"
+
+
+def test_repair_state_repeated_rejection():
+    assert app._derive_repair_state(True, True, 1, 5, "running", "REJECT") == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 2, 5, "running", "REJECT") == "rejected_attempts_remaining"
+    assert app._derive_repair_state(True, True, 4, 5, "running", "REJECT") == "rejected_attempts_remaining"
+
+
+def test_repair_state_exhausted():
+    assert app._derive_repair_state(True, True, 3, 3, "failed", "REJECT") == "exhausted"
+    assert app._derive_repair_state(True, True, 5, 3, "failed", None) == "exhausted"
+    assert app._derive_repair_state(True, True, 3, 3, "running", None) == "exhausted"
+
+
+def test_repair_state_disabled():
+    assert app._derive_repair_state(False, True, 3, 5, "running", None) == "none"
+    assert app._derive_repair_state(False, False, 0, 5, "running", None) == "none"
+
+
+def test_repair_state_not_yet_activated():
+    assert app._derive_repair_state(True, False, 3, 5, "running", None) == "none"
+    assert app._derive_repair_state(True, False, 0, 5, "running", None) == "none"
+
+
+def test_repair_state_malformed_values():
+    """All malformed values result in None → state none."""
+    assert app._derive_repair_state(None, None, None, None, None, None) == "none"

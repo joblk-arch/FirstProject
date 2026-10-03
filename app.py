@@ -249,6 +249,55 @@ async def session(request: Request):
     return {"username": request.state.username, "role": request.state.role}
 
 
+def _project_dashboard(raw: dict) -> dict:
+    """Project the gateway dashboard payload, adding safe repair visibility.
+
+    Passes through all existing fields unchanged. Adds:
+    - System-level: repair_enabled, repair_activated, repair_max_attempts
+    - Per-workflow: repair_state (derived) to each entry in recent_workflows
+
+    Missing or malformed repair fields yield None / "none" state, never errors.
+    """
+    result = dict(raw)
+
+    # System-level repair fields (safely validated)
+    result["repair_enabled"] = _safe_bool(raw.get("repair_enabled"))
+    result["repair_activated"] = _safe_bool(raw.get("repair_activated"))
+    result["repair_max_attempts"] = _safe_nonneg_int(raw.get("repair_max_attempts"))
+
+    # Per-workflow repair_state derivation
+    workflows = raw.get("recent_workflows")
+    if isinstance(workflows, list):
+        projected_workflows = []
+        for w in workflows:
+            if not isinstance(w, dict):
+                continue
+            entry = dict(w)
+            # Safely extract per-workflow repair fields
+            w_enabled = _safe_bool(w.get("repair_enabled"))
+            w_activated = _safe_bool(w.get("repair_activated"))
+            w_attempts = _safe_nonneg_int(w.get("repair_attempts"))
+            w_max = _safe_nonneg_int(w.get("repair_max_attempts"))
+            # Fall back to system-level values if per-workflow values are missing
+            if w_enabled is None:
+                w_enabled = result["repair_enabled"]
+            if w_activated is None:
+                w_activated = result["repair_activated"]
+            if w_max is None:
+                w_max = result["repair_max_attempts"]
+            w_status = w.get("overall")
+            w_verdict = w.get("reviewer_verdict")
+            if w_verdict not in {"APPROVE", "REJECT"}:
+                w_verdict = None
+            entry["repair_state"] = _derive_repair_state(
+                w_enabled, w_activated, w_attempts, w_max, w_status, w_verdict,
+            )
+            projected_workflows.append(entry)
+        result["recent_workflows"] = projected_workflows
+
+    return result
+
+
 @app.get("/api/dashboard")
 async def dashboard():
     key = _read_gateway_key()
@@ -258,7 +307,65 @@ async def dashboard():
             headers={"Authorization": f"Bearer {key}"},
         )
         response.raise_for_status()
-        return response.json()
+        raw = response.json()
+        if not isinstance(raw, dict):
+            return raw
+        return _project_dashboard(raw)
+
+
+def _safe_bool(value) -> bool | None:
+    """Return True/False only for actual booleans; None for anything else."""
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _safe_nonneg_int(value) -> int | None:
+    """Return a non-negative int; None for missing, negative, or non-int values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+def _derive_repair_state(
+    repair_enabled: bool | None,
+    repair_activated: bool | None,
+    repair_attempts: int | None,
+    repair_max_attempts: int | None,
+    status: str | None,
+    reviewer_verdict: str | None,
+) -> str:
+    """Derive a safe, read-only repair state from workflow metadata.
+
+    States:
+      - "none": repair not enabled/activated, or zero attempts
+      - "repairing": repair in progress (attempts > 0, < max, not yet resolved)
+      - "ready_after_repair": reviewer approved AND workflow ready-for-approval
+      - "rejected_attempts_remaining": reviewer rejected, attempts remain
+      - "exhausted": max attempts reached without success
+
+    Never implies success until reviewer approves AND workflow is ready-for-approval.
+    Never implies merged or pushed.
+    """
+    # If repair is explicitly disabled or not activated, no repair activity
+    if repair_enabled is False or repair_activated is False:
+        return "none"
+    # If no attempts recorded, no repair activity
+    if repair_attempts is None or repair_attempts == 0:
+        return "none"
+    # Success: reviewer approved AND workflow is ready for human approval
+    if status == "ready-for-approval" and reviewer_verdict == "APPROVE":
+        return "ready_after_repair"
+    # Exhausted: max attempts reached without success
+    if repair_max_attempts is not None and repair_attempts >= repair_max_attempts:
+        return "exhausted"
+    # Rejected with attempts remaining
+    if reviewer_verdict == "REJECT" and (repair_max_attempts is None or repair_attempts < repair_max_attempts):
+        return "rejected_attempts_remaining"
+    # In progress
+    return "repairing"
 
 
 def _project_stage(raw: dict) -> dict:
@@ -290,19 +397,37 @@ def _project_workflow(raw: dict) -> dict:
     if not isinstance(stages_raw, list):
         stages_raw = []
 
+    status = workflow_raw.get("overall")
+    reviewer_verdict = raw.get("reviewer_verdict")
+    if reviewer_verdict not in {"APPROVE", "REJECT"}:
+        reviewer_verdict = None
+
+    # Safely extract repair metadata
+    repair_enabled = _safe_bool(raw.get("repair_enabled"))
+    repair_activated = _safe_bool(raw.get("repair_activated"))
+    repair_attempts = _safe_nonneg_int(raw.get("repair_attempts"))
+    repair_max_attempts = _safe_nonneg_int(raw.get("repair_max_attempts"))
+
     result: dict = {
         "id": workflow_raw.get("id"),
         "objective": workflow_raw.get("objective"),
         "project": workflow_raw.get("project"),
-        "status": workflow_raw.get("overall"),
+        "status": status,
         "elapsed_seconds": workflow_raw.get("elapsed_seconds"),
         "stages": [
             _project_stage(s) for s in stages_raw if isinstance(s, dict)
         ],
         "tester_evidence": raw.get("tester_evidence")
         if isinstance(raw.get("tester_evidence"), str) else None,
-        "reviewer_verdict": raw.get("reviewer_verdict")
-        if raw.get("reviewer_verdict") in {"APPROVE", "REJECT"} else None,
+        "reviewer_verdict": reviewer_verdict,
+        "repair_enabled": repair_enabled,
+        "repair_activated": repair_activated,
+        "repair_attempts": repair_attempts,
+        "repair_max_attempts": repair_max_attempts,
+        "repair_state": _derive_repair_state(
+            repair_enabled, repair_activated, repair_attempts,
+            repair_max_attempts, status, reviewer_verdict,
+        ),
     }
 
     # Diff text only when the gateway safely provides it as a string.
