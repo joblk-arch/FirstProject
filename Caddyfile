@@ -2,7 +2,7 @@
 #
 # Topology:
 #   Remote user → HTTPS → Tailscale Serve (on the M5 / HTTPS endpoint host)
-#     → HTTP → 10.10.10.2:8443 (this proxy on the M1, bound to private Ethernet only)
+#     → HTTP → 10.10.10.2:8444 (this proxy on the M1, bound to private Ethernet only)
 #       → HTTP → dashboard:8080 (via dashboard-tls-proxy Docker network)
 #
 # Tailscale Serve runs on the M5 (10.10.10.1), not on the M1. It terminates
@@ -15,13 +15,13 @@
 # (172.28.0.2) on the internal Docker network.
 #
 # Security boundary:
-#   - Port 8443 is published only on 10.10.10.2 (private direct Ethernet).
+#   - Port 8444 is published only on 10.10.10.2 (private direct Ethernet).
 #   - Normal LAN clients (192.168.68.x) cannot reach this listener.
 #   - The dashboard's published port 192.168.68.68:8088 is on the default
 #     bridge network; LAN clients appear as the Docker bridge gateway IP,
 #     which is NOT in the trusted proxy list.
 
-:8443 {
+:8444 {
 	reverse_proxy dashboard:8080 {
 		header_up X-Forwarded-Proto https
 	}

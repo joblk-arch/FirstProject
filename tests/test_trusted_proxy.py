@@ -465,10 +465,10 @@ def test_compose_proxy_port_bound_to_private_ethernet():
     NOT to 0.0.0.0 or the LAN interface."""
     compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
     # The port binding must specify 10.10.10.2 as the host interface
-    assert "10.10.10.2:8443:8443" in compose
+    assert "10.10.10.2:8444:8444" in compose
     # Must NOT be bound to 0.0.0.0 or the LAN IP
-    assert "0.0.0.0:8443" not in compose
-    assert "192.168.68.68:8443" not in compose
+    assert "0.0.0.0:8444" not in compose
+    assert "192.168.68.68:8444" not in compose
 
 
 def test_compose_proxy_on_dedicated_network():
@@ -530,10 +530,11 @@ def test_compose_proxy_caddyfile_mounted():
 # 11. Caddyfile: configuration validation
 # ---------------------------------------------------------------------------
 
-def test_caddyfile_listens_on_8443():
-    """The Caddyfile must listen on port 8443."""
+def test_caddyfile_listens_on_8444():
+    """The Caddyfile must listen on port 8444 (backend), not 8443 (external Tailscale)."""
     caddyfile = (Path(__file__).resolve().parent.parent / "Caddyfile").read_text(encoding="utf-8")
-    assert ":8443" in caddyfile
+    assert ":8444" in caddyfile
+    assert ":8443" not in caddyfile
 
 
 def test_caddyfile_reverse_proxies_to_dashboard():
@@ -602,10 +603,10 @@ def test_readme_no_backend_flag():
 
 def test_readme_has_supported_serve_syntax():
     """The README must document the supported tailscale serve syntax:
-    tailscale serve --bg --https=8443 http://10.10.10.2:8443"""
+    tailscale serve --bg --https=8443 http://10.10.10.2:8444"""
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
-    assert "tailscale serve --bg --https=8443 http://10.10.10.2:8443" in readme, (
-        "README must document the supported 'tailscale serve --bg --https=8443 http://10.10.10.2:8443' syntax"
+    assert "tailscale serve --bg --https=8443 http://10.10.10.2:8444" in readme, (
+        "README must document external HTTPS 8443 forwarding to backend port 8444"
     )
 
 

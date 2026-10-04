@@ -128,10 +128,10 @@ original client connection was HTTPS. This is determined as follows:
 Remote user
     │  HTTPS (TLS terminated by Tailscale Serve on the M5)
     ▼
-M5 (10.10.10.1) — Tailscale Serve backend → http://10.10.10.2:8443
+M5 (10.10.10.1) — Tailscale Serve backend → http://10.10.10.2:8444
     │  HTTP over direct Ethernet link
     ▼
-M1 (10.10.10.2) — Caddy container (dashboard-tls-proxy, port 8443)
+M1 (10.10.10.2) — Caddy container (dashboard-tls-proxy, port 8444)
     │  HTTP + X-Forwarded-Proto: https (via dashboard-tls-proxy Docker network)
     ▼
 Dashboard container (172.28.0.x, port 8080)
@@ -140,7 +140,7 @@ Dashboard container (172.28.0.x, port 8080)
 - **Tailscale Serve** runs on the **M5** (the HTTPS endpoint host at
   `10.10.10.1`). It terminates TLS and forwards plain HTTP to the backend.
 - **Caddy** runs on the **M1** (`10.10.10.2`) in a dedicated Docker container.
-  Its port 8443 is published only on the private Ethernet interface.
+  Its port 8444 is published only on the private Ethernet interface.
 - The dashboard container is reachable from Caddy via the internal
   `dashboard-tls-proxy` Docker network (Caddy's source IP: `172.28.0.2`).
 
@@ -150,7 +150,7 @@ Three independent layers prevent LAN clients from spoofing the HTTPS trust:
 
 | Layer | Mechanism |
 |-------|-----------|
-| Interface binding | Port 8443 is published only on `10.10.10.2` (private Ethernet). LAN (`192.168.68.x`) cannot reach it. |
+| Interface binding | Port 8444 is published only on `10.10.10.2` (private Ethernet). LAN (`192.168.68.x`) cannot reach it. |
 | Docker network isolation | The proxy has a fixed IP (`172.28.0.2`) on a dedicated bridge network. Only the dashboard and Caddy exist on this network. |
 | Exact source-IP check | The dashboard trusts `X-Forwarded-Proto` only from `172.28.0.2`, loopback, or Tailscale CGNAT. LAN clients appearing as the Docker bridge gateway (`172.17.0.1`) are not trusted. |
 
@@ -164,7 +164,7 @@ On the **M5**, update the Tailscale Serve backend target:
 
 ```
 Before: http://192.168.68.68:8088  (or whatever the previous target was)
-After:  http://10.10.10.2:8443
+After:  http://10.10.10.2:8444
 ```
 
 This is the only external configuration change required. No Tailscale
@@ -172,7 +172,7 @@ configuration is stored in this repository; the change is made on the M5
 via:
 
 ```bash
-tailscale serve --bg --https=8443 http://10.10.10.2:8443
+tailscale serve --bg --https=8443 http://10.10.10.2:8444
 ```
 
 > **Note:** The `--https` port must match the port already configured for
@@ -187,7 +187,7 @@ tailscale serve status
 ```
 
 Expected output shows the HTTPS handler on port 8443 proxying to
-`http://10.10.10.2:8443`.
+`http://10.10.10.2:8444`.
 
 ### Safe Deploy Order
 
@@ -199,11 +199,11 @@ Expected output shows the HTTPS handler on port 8443 proxying to
 
 2. **Verify the proxy path** (from the M1):
    ```bash
-   curl -s http://10.10.10.2:8443/health
+   curl -s http://10.10.10.2:8444/health
    # Expected: {"status":"ok"}
    ```
 
-3. **Update Tailscale Serve on the M5** to point at `http://10.10.10.2:8443`.
+3. **Update Tailscale Serve on the M5** to point at `http://10.10.10.2:8444`.
 
 4. **Verify end-to-end** (from a remote device on the tailnet):
    ```bash
@@ -220,7 +220,7 @@ Expected output shows the HTTPS handler on port 8443 proxying to
 
 ```bash
 # Proxy is healthy (from M1):
-curl -s http://10.10.10.2:8443/health
+curl -s http://10.10.10.2:8444/health
 
 # Dashboard is healthy (from M1, LAN path):
 curl -s http://192.168.68.68:8088/health
@@ -229,8 +229,8 @@ curl -s http://192.168.68.68:8088/health
 docker compose ps dashboard-tls-proxy
 
 # Confirm the published port is bound to the correct interface:
-ss -tlnp | grep 8443
-# Expected: 10.10.10.2:8443 (NOT 0.0.0.0:8443 or 192.168.68.x:8443)
+ss -tlnp | grep 8444
+# Expected: 10.10.10.2:8444 (NOT 0.0.0.0:8444 or 192.168.68.x:8444)
 
 # Confirm the Docker network isolation:
 docker network inspect dashboard-tls-proxy --format '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}'
