@@ -1950,7 +1950,7 @@ def test_compose_no_telegram_port_published():
 
     Allowed published ports:
     - Dashboard: 192.168.68.68:8088:8080 (LAN HTTP)
-    - Caddy proxy: 10.10.10.2:8444:8444 (private Ethernet only, for Tailscale)
+    - Caddy proxy: 127.0.0.1:8444:8444 (M1 loopback only, for Tailscale)
     """
     compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
     ports_section = re.findall(r'ports:.*?(?=\n    \S|\Z)', compose, re.DOTALL)
@@ -1965,13 +1965,13 @@ def test_compose_no_telegram_port_published():
                 # Allowed: dashboard on LAN (192.168.68.68:8088:8080)
                 if host_ip == "192.168.68.68" and host_port == "8088" and container_port == "8080":
                     continue
-                # Allowed: Caddy proxy on private Ethernet (10.10.10.2:8444:8444)
-                if host_ip == "10.10.10.2" and host_port == "8444" and container_port == "8444":
+                # Allowed: Caddy proxy on M1 loopback (127.0.0.1:8444:8444)
+                if host_ip == "127.0.0.1" and host_port == "8444" and container_port == "8444":
                     continue
                 assert False, (
                     f"Unexpected published port mapping: {line}. "
                     "Only the dashboard 192.168.68.68:8088:8080 and the proxy "
-                    "10.10.10.2:8444:8444 may be published."
+                    "127.0.0.1:8444:8444 may be published."
                 )
 
 

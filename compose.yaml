@@ -25,9 +25,10 @@ services:
     ports:
       - "192.168.68.68:8088:8080"
     networks:
-      - default
-      - m1-agent-repo_chat
-      - dashboard-tls-proxy
+      default:
+      m1-agent-repo_chat:
+      dashboard-tls-proxy:
+        ipv4_address: 172.28.0.3
     volumes:
       - /Users/jkutner/.local/share/m1-agent/dashboard-data:/data
     healthcheck:
@@ -46,12 +47,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    # Port is bound ONLY to the private direct Ethernet interface (10.10.10.2).
-    # This ensures the proxy is unreachable from the Wi-Fi/LAN (192.168.68.x).
-    # Tailscale Serve on the M5 (10.10.10.1) forwards terminated-HTTPS traffic
-    # over the direct Ethernet link to this listener.
+    # Port is bound ONLY to M1 loopback. Tailscale Serve runs on this same
+    # host and is the only process that can reach the backend listener.
     ports:
-      - "10.10.10.2:8444:8444"
+      - "127.0.0.1:8444:8444"
     networks:
       dashboard-tls-proxy:
         ipv4_address: 172.28.0.2

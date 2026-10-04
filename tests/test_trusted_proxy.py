@@ -460,15 +460,13 @@ def test_compose_has_dashboard_tls_proxy_service():
     assert "dashboard-tls-proxy:" in compose
 
 
-def test_compose_proxy_port_bound_to_private_ethernet():
-    """The proxy port must be bound only to 10.10.10.2 (private direct Ethernet),
-    NOT to 0.0.0.0 or the LAN interface."""
+def test_compose_proxy_port_bound_to_loopback():
+    """The proxy port must be bound only to M1 loopback."""
     compose = (Path(__file__).resolve().parent.parent / "compose.yaml").read_text(encoding="utf-8")
-    # The port binding must specify 10.10.10.2 as the host interface
-    assert "10.10.10.2:8444:8444" in compose
-    # Must NOT be bound to 0.0.0.0 or the LAN IP
+    assert "127.0.0.1:8444:8444" in compose
     assert "0.0.0.0:8444" not in compose
     assert "192.168.68.68:8444" not in compose
+    assert "10.10.10.2:8444" not in compose
 
 
 def test_compose_proxy_on_dedicated_network():
@@ -487,6 +485,7 @@ def test_compose_dashboard_on_proxy_network():
     dashboard_match = re.search(r"^  dashboard:\n(.*?)(?=^  \S|\Z)", compose, re.MULTILINE | re.DOTALL)
     assert dashboard_match is not None
     assert "dashboard-tls-proxy" in dashboard_match.group(0)
+    assert "ipv4_address: 172.28.0.3" in dashboard_match.group(0)
 
 
 def test_compose_trusted_proxy_ip_env():
@@ -561,16 +560,11 @@ def test_caddyfile_no_custom_auth_header():
     assert "X-Shared-Secret" not in caddyfile
 
 
-def test_caddyfile_documents_tailscale_on_m5():
-    """The Caddyfile must document that Tailscale Serve runs on the M5,
-    not on the M1. It must not claim Tailscale runs on the M1."""
+def test_caddyfile_documents_tailscale_on_m1():
+    """The Caddyfile must document the observed local M1 Serve topology."""
     caddyfile = (Path(__file__).resolve().parent.parent / "Caddyfile").read_text(encoding="utf-8")
-    # Must mention M5 as the Tailscale Serve host
-    assert "M5" in caddyfile
-    # Must not claim Tailscale Serve runs on the M1
-    # (The M1 is the Caddy host; Tailscale is on the M5)
-    assert "Tailscale Serve on the M1" not in caddyfile
-    assert "Tailscale Serve (on the M1" not in caddyfile
+    assert "Tailscale Serve (on the M1)" in caddyfile
+    assert "127.0.0.1:8444" in caddyfile
 
 
 # ---------------------------------------------------------------------------
@@ -603,9 +597,9 @@ def test_readme_no_backend_flag():
 
 def test_readme_has_supported_serve_syntax():
     """The README must document the supported tailscale serve syntax:
-    tailscale serve --bg --https=8443 http://10.10.10.2:8444"""
+    tailscale serve --bg --https=8443 http://127.0.0.1:8444"""
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
-    assert "tailscale serve --bg --https=8443 http://10.10.10.2:8444" in readme, (
+    assert "tailscale serve --bg --https=8443 http://127.0.0.1:8444" in readme, (
         "README must document external HTTPS 8443 forwarding to backend port 8444"
     )
 
