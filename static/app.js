@@ -2,6 +2,17 @@ const $ = (id) => document.getElementById(id);
 const fmt = (n) => new Intl.NumberFormat().format(n || 0);
 const duration = (n) => n == null ? '\u2014' : n < 60 ? `${n}s` : `${Math.floor(n / 60)}m ${n % 60}s`;
 const safe = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const ROUTING_REASON_LABELS = {
+  'explicit-fast': 'Fast selected',
+  'explicit-deep': 'Deep selected',
+  'reasoning-keyword': 'Reasoning task',
+  'long-complex-prompt': 'Complex prompt',
+  'default-fast': 'Fast default',
+  'reasoner-default-deep': 'Reasoner default',
+  'auto-mutation-stays-fast': 'Tool-safe fast',
+};
+const routingReason = (reason) => ROUTING_REASON_LABELS[reason] || '\u2014';
+const modelWithReason = (model, reason) => `${safe(model || 'Not recorded')}<small class="model-reason">${safe(routingReason(reason))}</small>`;
 const dialog = $('workflow-dialog');
 const workflowContent = $('workflow-content');
 let activeWorkflowId = null;
@@ -45,7 +56,7 @@ function render(data) {
   $('jobs').innerHTML = jobs.length ? jobs.slice(0,20).map((job) => {
     const label = safe(job.stage || job.role);
     const stage = job.workflow_id ? `<button class="workflow-link" type="button" data-workflow-id="${safe(job.workflow_id)}" aria-label="Open ${label} workflow details">${label}</button>` : label;
-    return `<tr><td>${stage}</td><td>${safe(job.project)}</td><td><span class="status ${safe(job.status)}">${safe(job.status)}</span></td><td>${safe(job.model || 'Not recorded')}</td><td>${job.total_tokens == null ? '\u2014' : fmt(job.total_tokens)}</td><td>${duration(job.duration_seconds)}</td></tr>`;
+    return `<tr><td>${stage}</td><td>${safe(job.project)}</td><td><span class="status ${safe(job.status)}">${safe(job.status)}</span></td><td>${modelWithReason(job.model, job.model_reason)}</td><td>${job.total_tokens == null ? '\u2014' : fmt(job.total_tokens)}</td><td>${duration(job.duration_seconds)}</td></tr>`;
   }).join('') : '<tr><td colspan="6" class="empty">No agent jobs yet.</td></tr>';
   const byProject = Object.groupBy ? Object.groupBy(counts,(x) => x.project) : counts.reduce((all,x) => ((all[x.project] ??= []).push(x),all),{});
   $('projects').innerHTML = data.projects.map((project) => { const rows=byProject[project.name]||[]; const total=rows.reduce((n,x)=>n+x.count,0); const running=rows.filter((x)=>['running','queued'].includes(x.status)).reduce((n,x)=>n+x.count,0); const width=Math.min(100,total?Math.max(5,running/total*100):0); return `<div class="item"><div class="item-row"><strong>${safe(project.name)}</strong><span>${total} jobs</span></div><small>${safe(project.default_branch)} \u00b7 ${running} active</small><div class="bar"><i style="width:${width}%"></i></div></div>`; }).join('');
@@ -63,12 +74,13 @@ function render(data) {
     const repair = repairBadge(w.repair_state, w.repair_attempts, w.repair_max_attempts);
     const origin = w.origin != null ? safe(w.origin) : '\u2014';
     const models = Array.isArray(w.models) ? w.models.map((m) => safe(m)).join(', ') : (w.models != null ? safe(w.models) : '\u2014');
+    const modelReasons = Array.isArray(w.model_reasons) && w.model_reasons.length ? w.model_reasons.map(routingReason).map(safe).join(', ') : '\u2014';
     const stageCounts = w.stage_counts != null ? (typeof w.stage_counts === 'object' ? Object.entries(w.stage_counts).map(([k, v]) => `${safe(k)}:${safe(v)}`).join(' ') : safe(w.stage_counts)) : '\u2014';
     const tokens = w.total_tokens == null ? '\u2014' : `${fmt(w.prompt_tokens)} / ${fmt(w.completion_tokens)} / ${fmt(w.total_tokens)}`;
     const created = w.created_at ? new Date(w.created_at).toLocaleString() : '\u2014';
     const label = w.project != null ? safe(w.project) : 'Unknown';
     const link = id ? `<button class="workflow-link" type="button" data-workflow-id="${id}" aria-label="Open ${label} workflow details">${label}</button>` : label;
-    return `<tr><td>${link}</td><td>${objective}</td><td><span class="status ${status}">${status}</span></td><td>${repair}</td><td>${origin}</td><td>${models}</td><td>${stageCounts}</td><td>${tokens}</td><td>${created}</td></tr>`;
+    return `<tr><td>${link}</td><td>${objective}</td><td><span class="status ${status}">${status}</span></td><td>${repair}</td><td>${origin}</td><td>${models}<small class="model-reason">${modelReasons}</small></td><td>${stageCounts}</td><td>${tokens}</td><td>${created}</td></tr>`;
   }).join('') : '<tr><td colspan="9" class="empty">No workflows recorded yet.</td></tr>';
   $('updated').textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
   $('error').hidden = true;
@@ -77,7 +89,7 @@ function render(data) {
 function stageCard(stage,index) {
   const tokens = stage.total_tokens == null ? 'Not recorded' : `${fmt(stage.total_tokens)} total`;
   const report = stage.report ? `<details><summary>Stage report</summary><pre class="report">${safe(stage.report)}</pre></details>` : '<p class="muted-copy">No stage report available.</p>';
-  return `<article class="stage-card"><div class="stage-order" aria-hidden="true">${index+1}</div><div class="stage-body"><div class="stage-head"><div><span class="stage-role">${safe(stage.stage||stage.role)}</span><strong>${safe(stage.role||'agent')}</strong></div><span class="status ${safe(stage.status)}">${safe(stage.status)}</span></div><dl class="stage-meta"><div><dt>Duration</dt><dd>${duration(stage.duration_seconds)}</dd></div><div><dt>Model</dt><dd>${safe(stage.model||'Not recorded')}</dd></div><div><dt>Tokens</dt><dd>${tokens}</dd></div><div><dt>Input / output</dt><dd>${stage.prompt_tokens==null?'\u2014':`${fmt(stage.prompt_tokens)} / ${fmt(stage.completion_tokens)}`}</dd></div></dl>${report}</div></article>`;
+  return `<article class="stage-card"><div class="stage-order" aria-hidden="true">${index+1}</div><div class="stage-body"><div class="stage-head"><div><span class="stage-role">${safe(stage.stage||stage.role)}</span><strong>${safe(stage.role||'agent')}</strong></div><span class="status ${safe(stage.status)}">${safe(stage.status)}</span></div><dl class="stage-meta"><div><dt>Duration</dt><dd>${duration(stage.duration_seconds)}</dd></div><div><dt>Model</dt><dd>${modelWithReason(stage.model, stage.model_reason)}</dd></div><div><dt>Tokens</dt><dd>${tokens}</dd></div><div><dt>Input / output</dt><dd>${stage.prompt_tokens==null?'\u2014':`${fmt(stage.prompt_tokens)} / ${fmt(stage.completion_tokens)}`}</dd></div></dl>${report}</div></article>`;
 }
 
 function workflowActions(workflow) {

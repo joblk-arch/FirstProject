@@ -672,6 +672,10 @@ def _project_dashboard(raw: dict) -> dict:
                 w_max = result["repair_max_attempts"]
             w_status = w.get("overall") or w.get("status")
             entry["status"] = w_status
+            # Safely project the routing reasons; overrides any raw value from
+            # the pass-through dict so prompts/outputs/paths/credentials are
+            # never exposed. None lets the UI fall back to a graceful em dash.
+            entry["model_reasons"] = _safe_model_reasons(w.get("model_reasons"))
             w_verdict = w.get("reviewer_verdict")
             if w_verdict not in {"APPROVE", "REJECT"}:
                 w_verdict = None
@@ -771,6 +775,58 @@ def _derive_repair_state(
     return "none"
 
 
+MODEL_REASON_ALLOWLIST = frozenset({
+    "explicit-fast",
+    "explicit-deep",
+    "reasoning-keyword",
+    "long-complex-prompt",
+    "default-fast",
+    "reasoner-default-deep",
+    "auto-mutation-stays-fast",
+})
+
+
+def _safe_model_reason(value) -> str | None:
+    """Return the model routing reason only if it is in the exact allow-list.
+
+    Accepts only the known, safe routing reason strings. Unknown, non-string,
+    control-character, or oversized values project to None so they never reach
+    HTML. Returns None for anything else so the UI can fall back to a graceful
+    em dash.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value not in MODEL_REASON_ALLOWLIST:
+        return None
+    return value
+
+
+MAX_MODEL_REASONS = len(MODEL_REASON_ALLOWLIST)
+
+
+def _safe_model_reasons(value) -> list[str] | None:
+    """Project a workflow summary's ``model_reasons`` to a safe, bounded list.
+
+    Accepts only a list whose entries are non-empty strings of bounded length
+    with no control characters. Never passes through prompts, outputs, errors,
+    paths, credentials, or raw arbitrary fields. Returns None when the raw value
+    is not a list so the UI can fall back to a graceful em dash.
+    """
+    if not isinstance(value, list):
+        return None
+    reasons = []
+    seen = set()
+    for item in value:
+        safe = _safe_model_reason(item)
+        if safe is not None and safe not in seen:
+            reasons.append(safe)
+            seen.add(safe)
+        if len(reasons) >= MAX_MODEL_REASONS:
+            break
+    return reasons
+
+
 def _project_stage(raw: dict) -> dict:
     """Project a single stage to the strict read-only allow-list."""
     return {
@@ -779,6 +835,7 @@ def _project_stage(raw: dict) -> dict:
         "status": raw.get("status"),
         "duration_seconds": raw.get("duration_seconds"),
         "model": raw.get("model"),
+        "model_reason": _safe_model_reason(raw.get("model_reason")),
         "prompt_tokens": raw.get("prompt_tokens"),
         "completion_tokens": raw.get("completion_tokens"),
         "total_tokens": raw.get("total_tokens"),
@@ -1304,6 +1361,8 @@ def _project_running_job(job: dict) -> dict:
         "id": job.get("workflow_id") if isinstance(job.get("workflow_id"), str) else None,
         "project": job.get("project") if isinstance(job.get("project"), str) else None,
         "stage": job.get("stage") if isinstance(job.get("stage"), str) else None,
+        "model": job.get("model") if isinstance(job.get("model"), str) else None,
+        "model_reason": _safe_model_reason(job.get("model_reason")),
     }
 
 
