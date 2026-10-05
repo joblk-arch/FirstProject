@@ -1,0 +1,5 @@
+.health-efficiency-summary{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.health-efficiency{display:inline-block;margin-top:4px;color:var(--muted);font-size:.82rem}
+.health-efficiency-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:5px}
+.health-efficiency-list li{display:flex;flex-wrap:wrap;gap:8px;color:var(--muted);font-size:.82rem}
+.health-efficiency-warning{color:var(--red);font-weight:700}

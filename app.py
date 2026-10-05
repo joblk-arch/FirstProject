@@ -1351,18 +1351,48 @@ async def _check_lm_studio_models() -> dict:
         return {"status": "unknown", "models": [], "last_checked": now, "detail": None, "latency_ms": None}
 
 
+DUPLICATE_TOOL_CALL_WARNING_THRESHOLD = 5
+
+
+def _safe_metric_count(value: object, maximum: int = 10_000_000) -> int | None:
+    """Return a bounded non-negative integer metric without accepting booleans."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= maximum else None
+
+
 def _project_running_job(job: dict) -> dict:
     """Project a single running job to the strict read-only allow-list.
 
     Only safe, read-only fields are included. Prompts, secrets, credentials,
     internal URLs, and filesystem/worktree paths are never passed through.
     """
+    duplicate_tool_call_count = _safe_metric_count(job.get("duplicate_tool_call_count"))
     return {
         "id": job.get("workflow_id") if isinstance(job.get("workflow_id"), str) else None,
         "project": job.get("project") if isinstance(job.get("project"), str) else None,
         "stage": job.get("stage") if isinstance(job.get("stage"), str) else None,
         "model": job.get("model") if isinstance(job.get("model"), str) else None,
         "model_reason": _safe_model_reason(job.get("model_reason")),
+        "duplicate_tool_call_count": duplicate_tool_call_count,
+        "duplicate_warning": duplicate_tool_call_count is not None and (
+            duplicate_tool_call_count > DUPLICATE_TOOL_CALL_WARNING_THRESHOLD
+        ),
+    }
+
+
+def _project_workflow_efficiency(workflow: dict) -> dict:
+    """Project a recent workflow to safe aggregate performance fields only."""
+    duplicate_tool_call_count = _safe_metric_count(workflow.get("duplicate_tool_call_count"))
+    return {
+        "id": workflow.get("id") if isinstance(workflow.get("id"), str) else None,
+        "project": workflow.get("project") if isinstance(workflow.get("project"), str) else None,
+        "overall": workflow.get("overall") if isinstance(workflow.get("overall"), str) else None,
+        "total_tokens": _safe_metric_count(workflow.get("total_tokens")),
+        "duplicate_tool_call_count": duplicate_tool_call_count,
+        "duplicate_warning": duplicate_tool_call_count is not None and (
+            duplicate_tool_call_count > DUPLICATE_TOOL_CALL_WARNING_THRESHOLD
+        ),
     }
 
 
@@ -1377,7 +1407,9 @@ def _project_agent_queue(gateway_data: dict) -> dict:
     if not gateway_data:
         return {
             "queued": 0, "running": 0, "running_jobs": [],
-            "current_job": None, "last_checked": now, "detail": "unavailable",
+            "current_job": None, "workflow_efficiency": [],
+            "duplicate_tool_call_warning_threshold": DUPLICATE_TOOL_CALL_WARNING_THRESHOLD,
+            "last_checked": now, "detail": "unavailable",
         }
     jobs = gateway_data.get("jobs", [])
     if not isinstance(jobs, list):
@@ -1390,11 +1422,21 @@ def _project_agent_queue(gateway_data: dict) -> dict:
     ]
     running = len(running_jobs)
     current_job = running_jobs[0] if running_jobs else None
+    workflows = gateway_data.get("recent_workflows", [])
+    if not isinstance(workflows, list):
+        workflows = []
+    workflow_efficiency = [
+        _project_workflow_efficiency(workflow)
+        for workflow in workflows
+        if isinstance(workflow, dict)
+    ][:5]
     return {
         "queued": queued,
         "running": running,
         "running_jobs": running_jobs[:MAX_RUNNING_JOBS],
         "current_job": current_job,
+        "workflow_efficiency": workflow_efficiency,
+        "duplicate_tool_call_warning_threshold": DUPLICATE_TOOL_CALL_WARNING_THRESHOLD,
         "last_checked": now,
         "detail": None,
     }

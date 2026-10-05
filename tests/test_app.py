@@ -2642,6 +2642,7 @@ def test_project_agent_queue_empty():
     assert result["running_jobs"] == []
     assert result["current_job"] is None
     assert result["detail"] == "unavailable"
+    assert result["workflow_efficiency"] == []
 
 
 def test_project_agent_queue_queued_and_running_counts():
@@ -2707,7 +2708,31 @@ def test_project_agent_queue_no_unsafe_fields():
     assert "bearer-token-abc" not in raw
     # Each running job must have exactly the allow-listed keys
     for job in result["running_jobs"]:
-        assert set(job.keys()) == {"id", "project", "stage", "model", "model_reason"}
+        assert set(job.keys()) == {"id", "project", "stage", "model", "model_reason", "duplicate_tool_call_count", "duplicate_warning"}
+
+
+def test_project_agent_queue_projects_duplicate_metrics_and_workflow_aggregates():
+    result = app._project_agent_queue({
+        "jobs": [{"workflow_id": "running000", "project": "p1", "stage": "implement", "status": "running", "duplicate_tool_call_count": 6}],
+        "recent_workflows": [{"id": "workflow01", "project": "p1", "overall": "completed", "total_tokens": 1234, "duplicate_tool_call_count": 5}],
+    })
+    assert result["current_job"]["duplicate_tool_call_count"] == 6
+    assert result["current_job"]["duplicate_warning"] is True
+    assert result["workflow_efficiency"] == [{
+        "id": "workflow01", "project": "p1", "overall": "completed", "total_tokens": 1234,
+        "duplicate_tool_call_count": 5, "duplicate_warning": False,
+    }]
+
+
+def test_project_agent_queue_rejects_invalid_duplicate_metrics():
+    result = app._project_agent_queue({
+        "jobs": [{"workflow_id": "running000", "project": "p1", "stage": "implement", "status": "running", "duplicate_tool_call_count": True}],
+        "recent_workflows": [{"id": "workflow01", "project": "p1", "total_tokens": -1, "duplicate_tool_call_count": "secret"}],
+    })
+    assert result["current_job"]["duplicate_tool_call_count"] is None
+    assert result["current_job"]["duplicate_warning"] is False
+    assert result["workflow_efficiency"][0]["total_tokens"] is None
+    assert result["workflow_efficiency"][0]["duplicate_tool_call_count"] is None
 
 
 # --- Cluster Health: TestClient endpoint tests ---
@@ -2832,7 +2857,7 @@ def test_cluster_health_exact_payload_shape(tmp_path: Path, auth_headers):
     assert set(data["lm_studio"].keys()) == {"status", "models", "last_checked", "detail"}
     for m in data["lm_studio"]["models"]:
         assert set(m.keys()) == {"id", "loaded"}
-    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "last_checked", "detail"}
+    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "workflow_efficiency", "duplicate_tool_call_warning_threshold", "last_checked", "detail"}
 
 
 def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers):
@@ -3284,6 +3309,7 @@ def test_frontend_js_cluster_health_uses_safe():
     assert "safe(svc.detail)" in body
     assert "safe(m.id)" in body
     assert "safe(agentQueue.current_job.id" in body
+    assert "health-efficiency" in body
 
 
 def test_frontend_js_cluster_health_statuses():

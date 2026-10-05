@@ -458,7 +458,16 @@ function renderClusterHealth(data) {
 
   const queueSection = `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status ${agentQueue.running > 0 ? 'running' : 'unknown'}">queue</span><span class="health-latency">${agentQueue.running || 0} running / ${agentQueue.queued || 0} queued</span></div>${agentQueue.current_job ? `<p class="health-current-job">Current: <code>${safe(agentQueue.current_job.id || '\u2014')}</code> \u00b7 ${safe(agentQueue.current_job.project || '\u2014')} \u00b7 ${safe(agentQueue.current_job.stage || '\u2014')}</p>` : '<p class="muted-copy">No active jobs.</p>'}</article>`;
 
-  container.innerHTML = `${overallBadge}<div class="health-cards">${serviceCards}${lmSection}${queueSection}</div>`;
+  const current = agentQueue.current_job;
+  const currentMetric = current && current.duplicate_tool_call_count != null
+    ? `<span class="health-efficiency ${current.duplicate_warning ? 'health-efficiency-warning' : ''}">Duplicate tool calls: ${safe(current.duplicate_tool_call_count)}${current.duplicate_warning ? ' ⚠' : ''}</span>`
+    : '<span class="health-efficiency">Duplicate tool calls: —</span>';
+  const workflowEfficiency = Array.isArray(agentQueue.workflow_efficiency) ? agentQueue.workflow_efficiency : [];
+  const efficiencyList = workflowEfficiency.length
+    ? `<ul class="health-efficiency-list" aria-label="Recent workflow efficiency">${workflowEfficiency.map((workflow) => `<li><code>${safe(workflow.id || '—')}</code><span>${safe(workflow.project || '—')}</span><span>${workflow.total_tokens != null ? `${safe(workflow.total_tokens)} tokens` : '— tokens'}</span><span class="${workflow.duplicate_warning ? 'health-efficiency-warning' : ''}">${workflow.duplicate_tool_call_count != null ? `${safe(workflow.duplicate_tool_call_count)} duplicate calls${workflow.duplicate_warning ? ' ⚠' : ''}` : 'Duplicate calls: —'}</span></li>`).join('')}</ul>`
+    : '<p class="muted-copy">No completed workflow efficiency data.</p>';
+  const efficiencySection = `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status ${current && current.duplicate_warning ? 'degraded' : 'healthy'}">efficiency</span><span class="health-latency">duplicate-call threshold ${safe(agentQueue.duplicate_tool_call_warning_threshold || '—')}</span></div>${current ? `<p class="health-current-job">Active job: <code>${safe(current.id || '—')}</code> · ${safe(current.project || '—')} · ${safe(current.stage || '—')}</p>${currentMetric}` : '<p class="muted-copy">No active jobs.</p>'}<div class="health-efficiency-summary"><strong>Recent workflows</strong>${efficiencyList}</div></article>`;
+  container.innerHTML = `${overallBadge}<div class="health-cards">${serviceCards}${lmSection}${queueSection}${efficiencySection}</div>`;
 }
 
 function renderClusterHealthError() {
