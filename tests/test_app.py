@@ -4969,6 +4969,12 @@ def test_frontend_js_acknowledge_sends_confirm():
     assert "confirm: jobId" in body
 
 
+def test_frontend_html_versions_javascript_asset():
+    """Deployments must change the script URL so Safari cannot reuse stale UI code."""
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'src="/app.js?v=20b0d24"' in html
+
+
 def test_frontend_js_alerts_polling():
     """The alerts panel must poll periodically."""
     js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
