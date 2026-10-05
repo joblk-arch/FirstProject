@@ -535,7 +535,7 @@ function renderAlerts(data) {
     const project = a.project ? safe(a.project) : '\u2014';
     const status = a.status ? safe(a.status) : 'unknown';
     const created = a.created_at ? new Date(a.created_at).toLocaleString() : '\u2014';
-    const btn = isAdmin ? `<button type="button" class="acknowledge-btn" data-ack-job-id="${id}" aria-label="Acknowledge alert ${id}">Acknowledge</button>` : '';
+    const btn = isAdmin ? `<button type="button" class="acknowledge-btn" data-ack-job-id="${id}" aria-label="Acknowledge alert ${id}">Acknowledge</button><span class="alert-status" role="status" aria-live="polite" data-ack-status="${id}"></span>` : '';
     return `<div class="alert-item"><div class="alert-item-head"><code>${id}</code><span class="status ${status}">${status}</span></div><small>${project} \u00b7 ${created}</small>${btn ? `<div class="alert-actions">${btn}</div>` : ''}</div>`;
   }).join('') : '<p class="muted-copy">No active alerts.</p>';
   if (historyContainer) {
@@ -550,128 +550,25 @@ function renderAlerts(data) {
 
 let ackInFlight = false;
 
-function openAcknowledgeDialog(jobId) {
+async function acknowledgeAlert(jobId) {
   if (ackInFlight) return;
-  const container = $('alerts');
-  if (!container) return;
-  // Remove any existing dialog
-  const existing = container.querySelector('.ack-dialog');
-  if (existing) existing.remove();
-
-  const dialog = document.createElement('div');
-  dialog.className = 'ack-dialog';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-labelledby', `ack-title-${jobId}`);
-  dialog.setAttribute('aria-describedby', `ack-desc-${jobId}`);
-  dialog.innerHTML = `
-    <div class="ack-dialog-inner">
-      <h3 id="ack-title-${jobId}">Acknowledge alert ${safe(jobId)}</h3>
-      <p id="ack-desc-${jobId}" class="ack-dialog-desc">Confirm acknowledgment of alert <code>${safe(jobId)}</code>. This action cannot be undone.</p>
-      <label for="ack-note-${jobId}">Resolution note <span class="required-mark">*</span></label>
-      <textarea id="ack-note-${jobId}" data-ack-note="${jobId}" maxlength="500" rows="3" placeholder="Describe the resolution (1\u2013500 characters)"></textarea>
-      <span class="ack-char-count" data-ack-count="${jobId}">0/500</span>
-      <p class="ack-confirm-text" data-ack-confirm="${jobId}">Type the job ID to confirm: <code>${safe(jobId)}</code></p>
-      <input type="text" id="ack-confirm-${jobId}" data-ack-confirm-input="${jobId}" maxlength="12" placeholder="${safe(jobId)}" autocomplete="off" spellcheck="false" aria-label="Type the job ID ${safe(jobId)} to confirm">
-      <div class="ack-dialog-actions">
-        <button type="button" class="ack-cancel-btn" data-ack-cancel="${jobId}">Cancel</button>
-        <button type="button" class="ack-submit-btn" data-ack-submit="${jobId}" disabled>Acknowledge</button>
-      </div>
-      <p class="alert-status" role="status" aria-live="polite" data-ack-status="${jobId}"></p>
-    </div>`;
-  // Insert into the alert item
-  const alertItem = container.querySelector(`[data-ack-job-id="${jobId}"]`)?.closest('.alert-item');
-  if (alertItem) {
-    alertItem.appendChild(dialog);
-  } else {
-    container.appendChild(dialog);
-  }
-  // Focus the note textarea
-  const noteEl = dialog.querySelector(`[data-ack-note="${jobId}"]`);
-  if (noteEl) noteEl.focus();
-
-  // Character count + submit enable/disable
-  const countEl = dialog.querySelector(`[data-ack-count="${jobId}"]`);
-  const confirmInput = dialog.querySelector(`[data-ack-confirm-input="${jobId}"]`);
-  const submitBtn = dialog.querySelector(`[data-ack-submit="${jobId}"]`);
-
-  function updateValidation() {
-    const noteVal = noteEl.value.trim();
-    const confirmVal = confirmInput.value.trim();
-    if (countEl) countEl.textContent = `${noteEl.value.length}/500`;
-    const valid = noteVal.length >= 1 && noteVal.length <= 500 && confirmVal === jobId;
-    submitBtn.disabled = !valid || ackInFlight;
-  }
-  noteEl.addEventListener('input', updateValidation);
-  confirmInput.addEventListener('input', updateValidation);
-
-  // Cancel
-  const cancelBtn = dialog.querySelector(`[data-ack-cancel="${jobId}"]`);
-  cancelBtn.addEventListener('click', () => {
-    dialog.remove();
-    // Return focus to the trigger button
-    const trigger = container.querySelector(`[data-ack-job-id="${jobId}"]`);
-    if (trigger) trigger.focus();
-  });
-
-  // Keyboard: Escape to cancel
-  dialog.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelBtn.click();
-    }
-  });
-
-  // Submit
-  submitBtn.addEventListener('click', () => {
-    acknowledgeAlert(jobId, dialog);
-  });
-
-  // Enter in confirm input triggers submit
-  confirmInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      if (!submitBtn.disabled) submitBtn.click();
-    }
-  });
-}
-
-async function acknowledgeAlert(jobId, dialogEl) {
-  if (ackInFlight) return;
-  const container = $('alerts');
-  const noteEl = document.querySelector(`[data-ack-note="${jobId}"]`);
-  const confirmInput = document.querySelector(`[data-ack-confirm-input="${jobId}"]`);
-  const submitBtn = document.querySelector(`[data-ack-submit="${jobId}"]`);
+  const submitBtn = document.querySelector(`[data-ack-job-id="${jobId}"]`);
   const status = document.querySelector(`[data-ack-status="${jobId}"]`);
-  if (!noteEl || !confirmInput) return;
-
-  const trimmed = noteEl.value.trim();
-  if (trimmed.length < 1 || trimmed.length > 500) {
-    if (status) status.textContent = 'Note must be 1\u2013500 characters.';
-    return;
-  }
-  if (confirmInput.value.trim() !== jobId) {
-    if (status) status.textContent = 'Confirmation must match the job ID.';
-    return;
-  }
 
   ackInFlight = true;
   if (submitBtn) submitBtn.disabled = true;
-  const cancelBtn = document.querySelector(`[data-ack-cancel="${jobId}"]`);
-  if (cancelBtn) cancelBtn.disabled = true;
   if (status) status.textContent = 'Acknowledging\u2026';
 
   try {
     const response = await fetch(`/api/alerts/${encodeURIComponent(jobId)}/acknowledge`, {
       method: 'POST',
       headers: _csrfHeaders(),
-      body: JSON.stringify({resolution_note: trimmed, confirm: jobId}),
+      body: JSON.stringify({resolution_note: 'Acknowledged from dashboard', confirm: jobId}),
     });
     if (_handle401(response)) { if (status) status.textContent = 'Session expired. Please sign in again.'; return; }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.detail || `Acknowledgment returned ${response.status}.`);
     if (status) status.textContent = 'Acknowledged.';
-    // Remove dialog after success
-    if (dialogEl) dialogEl.remove();
     await loadAlerts();
     await load();
   } catch (error) {
@@ -679,13 +576,12 @@ async function acknowledgeAlert(jobId, dialogEl) {
   } finally {
     ackInFlight = false;
     if (submitBtn) submitBtn.disabled = false;
-    if (cancelBtn) cancelBtn.disabled = false;
   }
 }
 
 document.addEventListener('click', (event) => {
   const trigger = event.target.closest('[data-ack-job-id]');
-  if (trigger) openAcknowledgeDialog(trigger.dataset.ackJobId);
+  if (trigger) acknowledgeAlert(trigger.dataset.ackJobId);
 });
 
 $('refresh').addEventListener('click', () => { load(); loadAlerts(); });

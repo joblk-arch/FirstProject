@@ -4949,18 +4949,19 @@ def test_frontend_js_acknowledge_double_click_guard():
     assert "if (ackInFlight) return;" in body
 
 
-def test_frontend_js_acknowledge_requires_confirmation():
-    """The acknowledge function must require explicit confirmation naming the job ID."""
+def test_frontend_js_acknowledge_is_one_click():
+    """The acknowledge button must not prompt for a note or typed job ID."""
     js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
     match = re.search(r"async function acknowledgeAlert\(.*?\n\}", js, re.DOTALL)
     assert match is not None
     body = match.group(0)
-    assert "confirmInput" in body
-    assert "jobId" in body
+    assert "confirmInput" not in body
+    assert "resolution_note: 'Acknowledged from dashboard'" in body
+    assert "openAcknowledgeDialog" not in js
 
 
 def test_frontend_js_acknowledge_sends_confirm():
-    """The acknowledge POST must include the confirm field matching the job ID."""
+    """The one-click POST still derives confirmation from the alert row's job ID."""
     js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
     match = re.search(r"async function acknowledgeAlert\(.*?\n\}", js, re.DOTALL)
     assert match is not None
