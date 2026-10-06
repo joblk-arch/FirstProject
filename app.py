@@ -1396,6 +1396,23 @@ def _project_workflow_efficiency(workflow: dict) -> dict:
     }
 
 
+def _project_continuation_job(job: dict) -> dict:
+    """Project only bounded checkpoint fields needed for manual continuation."""
+    summary = job.get("checkpoint_summary")
+    if not isinstance(summary, str) or len(summary) > 256:
+        summary = None
+    return {
+        "id": job.get("id") if isinstance(job.get("id"), str) else None,
+        "workflow_id": job.get("workflow_id") if isinstance(job.get("workflow_id"), str) else None,
+        "project": job.get("project") if isinstance(job.get("project"), str) else None,
+        "stage": job.get("stage") if isinstance(job.get("stage"), str) else None,
+        "steps_used": _safe_metric_count(job.get("checkpoint_steps_used"), 60),
+        "source_mutated": job.get("checkpoint_source_mutated") == 1,
+        "test_ran": job.get("checkpoint_test_ran") == 1,
+        "summary": summary,
+    }
+
+
 def _project_agent_queue(gateway_data: dict) -> dict:
     """Project gateway dashboard data to a safe agent queue summary.
 
@@ -1408,6 +1425,7 @@ def _project_agent_queue(gateway_data: dict) -> dict:
         return {
             "queued": 0, "running": 0, "running_jobs": [],
             "current_job": None, "workflow_efficiency": [],
+            "needs_continuation": [],
             "duplicate_tool_call_warning_threshold": DUPLICATE_TOOL_CALL_WARNING_THRESHOLD,
             "last_checked": now, "detail": "unavailable",
         }
@@ -1422,6 +1440,10 @@ def _project_agent_queue(gateway_data: dict) -> dict:
     ]
     running = len(running_jobs)
     current_job = running_jobs[0] if running_jobs else None
+    needs_continuation = [
+        _project_continuation_job(job) for job in jobs
+        if isinstance(job, dict) and job.get("status") == "failed" and job.get("budget_exhausted") is True
+    ][:10]
     workflows = gateway_data.get("recent_workflows", [])
     if not isinstance(workflows, list):
         workflows = []
@@ -1436,6 +1458,7 @@ def _project_agent_queue(gateway_data: dict) -> dict:
         "running_jobs": running_jobs[:MAX_RUNNING_JOBS],
         "current_job": current_job,
         "workflow_efficiency": workflow_efficiency,
+        "needs_continuation": needs_continuation,
         "duplicate_tool_call_warning_threshold": DUPLICATE_TOOL_CALL_WARNING_THRESHOLD,
         "last_checked": now,
         "detail": None,

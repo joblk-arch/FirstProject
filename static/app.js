@@ -467,7 +467,9 @@ function renderClusterHealth(data) {
     ? `<ul class="health-efficiency-list" aria-label="Recent workflow efficiency">${workflowEfficiency.map((workflow) => `<li><code>${safe(workflow.id || '—')}</code><span>${safe(workflow.project || '—')}</span><span>${workflow.total_tokens != null ? `${safe(workflow.total_tokens)} tokens` : '— tokens'}</span><span class="${workflow.duplicate_warning ? 'health-efficiency-warning' : ''}">${workflow.duplicate_tool_call_count != null ? `${safe(workflow.duplicate_tool_call_count)} duplicate calls${workflow.duplicate_warning ? ' ⚠' : ''}` : 'Duplicate calls: —'}</span></li>`).join('')}</ul>`
     : '<p class="muted-copy">No completed workflow efficiency data.</p>';
   const efficiencySection = `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status ${current && current.duplicate_warning ? 'degraded' : 'healthy'}">efficiency</span><span class="health-latency">duplicate-call threshold ${safe(agentQueue.duplicate_tool_call_warning_threshold || '—')}</span></div>${current ? `<p class="health-current-job">Active job: <code>${safe(current.id || '—')}</code> · ${safe(current.project || '—')} · ${safe(current.stage || '—')}</p>${currentMetric}` : '<p class="muted-copy">No active jobs.</p>'}<div class="health-efficiency-summary"><strong>Recent workflows</strong>${efficiencyList}</div></article>`;
-  container.innerHTML = `${overallBadge}<div class="health-cards">${serviceCards}${lmSection}${queueSection}${efficiencySection}</div>`;
+  const continuations = Array.isArray(agentQueue.needs_continuation) ? agentQueue.needs_continuation : [];
+  const continuationSection = continuations.length ? `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status degraded">needs continuation</span><span class="health-latency">${safe(continuations.length)} job(s)</span></div><ul class="health-efficiency-list" aria-label="Jobs needing continuation">${continuations.map((job) => `<li><code>${safe(job.id || '—')}</code><span>${safe(job.project || '—')} · ${safe(job.stage || '—')}</span><span>${safe(job.steps_used == null ? '—' : job.steps_used)} steps</span><span>${job.source_mutated ? 'source changed' : 'no source change'} · ${job.test_ran ? 'tests ran' : 'tests not run'}</span>${job.workflow_id ? `<button type="button" data-workflow-id="${safe(job.workflow_id)}">Review and retry</button>` : ''}</li>`).join('')}</ul></article>` : '';
+  container.innerHTML = `${overallBadge}<div class="health-cards">${serviceCards}${lmSection}${queueSection}${efficiencySection}${continuationSection}</div>`;
 }
 
 function renderClusterHealthError() {
@@ -527,6 +529,7 @@ $('logout').addEventListener('click', logout);
 
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 $('workflows').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
+$('cluster-health').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);const action=event.target.closest('[data-workflow-action]');if(action)runWorkflowAction(action.dataset.workflowAction);});
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});

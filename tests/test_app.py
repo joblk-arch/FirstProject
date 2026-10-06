@@ -2643,6 +2643,7 @@ def test_project_agent_queue_empty():
     assert result["current_job"] is None
     assert result["detail"] == "unavailable"
     assert result["workflow_efficiency"] == []
+    assert result["needs_continuation"] == []
 
 
 def test_project_agent_queue_queued_and_running_counts():
@@ -2733,6 +2734,21 @@ def test_project_agent_queue_rejects_invalid_duplicate_metrics():
     assert result["current_job"]["duplicate_warning"] is False
     assert result["workflow_efficiency"][0]["total_tokens"] is None
     assert result["workflow_efficiency"][0]["duplicate_tool_call_count"] is None
+
+
+def test_project_agent_queue_projects_safe_continuation_jobs():
+    result = app._project_agent_queue({"jobs": [{
+        "id": "job123", "workflow_id": "workflow01", "project": "p1", "stage": "implement",
+        "status": "failed", "budget_exhausted": True, "checkpoint_steps_used": 40,
+        "checkpoint_source_mutated": 1, "checkpoint_test_ran": 0,
+        "checkpoint_summary": "Manual retry is available.", "prompt": "secret",
+    }]})
+    assert result["needs_continuation"] == [{
+        "id": "job123", "workflow_id": "workflow01", "project": "p1", "stage": "implement",
+        "steps_used": 40, "source_mutated": True, "test_ran": False,
+        "summary": "Manual retry is available.",
+    }]
+    assert "secret" not in app.json.dumps(result)
 
 
 # --- Cluster Health: TestClient endpoint tests ---
@@ -2857,7 +2873,7 @@ def test_cluster_health_exact_payload_shape(tmp_path: Path, auth_headers):
     assert set(data["lm_studio"].keys()) == {"status", "models", "last_checked", "detail"}
     for m in data["lm_studio"]["models"]:
         assert set(m.keys()) == {"id", "loaded"}
-    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "workflow_efficiency", "duplicate_tool_call_warning_threshold", "last_checked", "detail"}
+    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "workflow_efficiency", "needs_continuation", "duplicate_tool_call_warning_threshold", "last_checked", "detail"}
 
 
 def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers):
@@ -4998,7 +5014,7 @@ def test_frontend_js_acknowledge_sends_confirm():
 def test_frontend_html_versions_javascript_asset():
     """Deployments must change the script URL so Safari cannot reuse stale UI code."""
     html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'src="/app.js?v=routing-reasons-1"' in html
+    assert 'src="/app.js?v=continuation-jobs-1"' in html
 
 
 def test_frontend_js_alerts_polling():
