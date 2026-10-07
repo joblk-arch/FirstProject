@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict
 from fastapi.staticfiles import StaticFiles
@@ -96,6 +97,36 @@ def load_users_unlocked() -> dict:
     return validated
 
 
+def load_users_unlocked_strict() -> dict:
+    """Load the users dict, distinguishing a missing file from a malformed one.
+
+    - Missing file: returns an empty dict (safe to initialize on first write).
+    - Existing but malformed/unreadable file: raises ValueError so callers can
+      fail safely WITHOUT overwriting the existing file.
+
+    This is intentionally stricter than :func:`load_users_unlocked` (which
+    returns ``{}`` on any failure) so that admin mutations never clobber a
+    corrupted users file. Caller must hold ``_users_lock``.
+    """
+    try:
+        data = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ValueError("users file is malformed or unreadable")
+    if not isinstance(data, dict):
+        raise ValueError("users file is malformed")
+    validated = {}
+    for username, record in data.items():
+        if not isinstance(record, dict):
+            raise ValueError("users file is malformed")
+        role = record.get("role")
+        if not isinstance(role, str) or role not in VALID_ROLES:
+            raise ValueError("users file is malformed")
+        validated[username] = record
+    return validated
+
+
 def load_users() -> dict:
     """Load and validate the users JSON file (acquires _users_lock)."""
     with _users_lock:
@@ -125,15 +156,34 @@ def save_users_atomic(users: dict) -> None:
         raise
 
 
-def mutate_users(mutator) -> None:
+class PersistenceError(Exception):
+    """Raised when the user store cannot be written to disk."""
+
+
+def mutate_users(mutator, *, strict: bool = False):
     """Apply a mutation to the users dict under the users lock.
 
     Loads current users, calls mutator(users_dict), then saves atomically.
+    When *strict* is True, use ``load_users_unlocked_strict()`` which raises
+    ``ValueError`` on malformed data instead of silently returning ``{}``.
+    Missing file still returns ``{}`` (safe init) in both modes.
+
+    Returns whatever the mutator returns.  If the atomic save fails with an
+    ``OSError`` or a serialization error, a :class:`PersistenceError` is
+    raised (the in-memory mutation is discarded; the on-disk file is
+    unchanged).
     """
     with _users_lock:
-        users = load_users_unlocked()
-        mutator(users)
-        save_users_atomic(users)
+        if strict:
+            users = load_users_unlocked_strict()
+        else:
+            users = load_users_unlocked()
+        result = mutator(users)
+        try:
+            save_users_atomic(users)
+        except (OSError, TypeError, ValueError) as exc:
+            raise PersistenceError("Failed to persist user store") from exc
+        return result
 
 
 def revoke_user_sessions(username: str) -> None:
@@ -1935,6 +1985,244 @@ async def acknowledge_alert(job_id: str, payload: AcknowledgeAlertRequest, reque
         raise HTTPException(status_code=502, detail="Upstream gateway error")
     _audit(request, job_id, "acknowledge_alert", "succeeded")
     return {"ok": True, "job_id": job_id}
+
+
+class CreateUserRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str
+    password: str
+    role: str = "viewer"
+
+
+class ChangeRoleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+
+
+class SetDisabledRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    disabled: bool
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str
+
+
+def _sanitize_validation_errors(exc: RequestValidationError) -> list[dict]:
+    """Return sanitized validation errors that never include input values or context.
+
+    Preserves the field location and error type/message so clients get useful
+    feedback, but strips the ``input`` and ``ctx`` keys which may contain
+    password-bearing or otherwise sensitive data.
+    """
+    sanitized = []
+    for err in exc.errors():
+        sanitized.append({
+            "loc": list(err.get("loc", [])),
+            "msg": err.get("msg", "Validation error"),
+            "type": err.get("type", "value_error"),
+        })
+    return sanitized
+
+
+@app.exception_handler(RequestValidationError)
+async def _sanitized_validation_handler(request: Request, exc: RequestValidationError):
+    """Return 422 responses with sanitized errors (no input/ctx values)."""
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _sanitize_validation_errors(exc)},
+    )
+
+
+# Conservative bounded username allowlist: starts with a lowercase alphanumeric,
+# then lowercase alphanumerics / dot / underscore / hyphen, max 32 chars total.
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 128
+
+
+def _validate_username(username: str) -> str:
+    if not isinstance(username, str) or not USERNAME_RE.fullmatch(username):
+        raise HTTPException(status_code=400, detail="Invalid username")
+    return username
+
+
+def _validate_password(password: str) -> str:
+    if not isinstance(password, str):
+        raise HTTPException(status_code=400, detail="Password is required")
+    if not password.strip():
+        raise HTTPException(status_code=400, detail="Password must not be blank")
+    if len(password) < PASSWORD_MIN_LENGTH or len(password) > PASSWORD_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail="Password must be 12 to 128 characters")
+    if any(ord(c) < 32 for c in password):
+        raise HTTPException(status_code=400, detail="Password contains invalid characters")
+    return password
+
+
+def _require_admin(request: Request, action: str) -> None:
+    if getattr(request.state, "role", None) != "admin":
+        _audit(request, getattr(request.state, "username", "unknown"), action, "denied")
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _project_user(username: str, record: dict) -> dict:
+    return {
+        "username": username,
+        "role": record.get("role"),
+        "disabled": bool(record.get("disabled", False)),
+    }
+
+
+def _count_enabled_admins(users: dict) -> int:
+    return sum(
+        1
+        for record in users.values()
+        if isinstance(record, dict) and record.get("role") == "admin" and not record.get("disabled", False)
+    )
+
+
+def _is_last_enabled_admin(users: dict, username: str) -> bool:
+    record = users.get(username)
+    if not isinstance(record, dict):
+        return False
+    if record.get("role") != "admin" or record.get("disabled", False):
+        return False
+    return _count_enabled_admins(users) <= 1
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    _require_admin(request, "list_users")
+    with _users_lock:
+        users = load_users_unlocked()
+    return {"users": [_project_user(name, rec) for name, rec in users.items()]}
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(payload: CreateUserRequest, request: Request):
+    _require_admin(request, "create_user")
+    username = _validate_username(payload.username)
+    _validate_password(payload.password)
+    if payload.role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    def _mutate(users: dict):
+        if username in users:
+            _audit(request, username, "create_user", "denied")
+            raise HTTPException(status_code=409, detail="User already exists")
+        _audit(request, username, "create_user", "attempted")
+        record = create_password_record(payload.password, payload.role)
+        users[username] = record
+        return record
+
+    try:
+        record = mutate_users(_mutate, strict=True)
+    except ValueError:
+        _audit(request, username, "create_user", "failed")
+        raise HTTPException(status_code=500, detail="User store unavailable")
+    except PersistenceError:
+        _audit(request, username, "create_user", "failed")
+        raise HTTPException(status_code=500, detail="Internal error")
+    _audit(request, username, "create_user", "succeeded")
+    return {"ok": True, "user": _project_user(username, record)}
+
+
+@app.patch("/api/admin/users/{username}")
+async def admin_change_role(username: str, payload: ChangeRoleRequest, request: Request):
+    _require_admin(request, "change_role")
+    username = _validate_username(username)
+    if payload.role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    def _mutate(users: dict):
+        record = users.get(username)
+        if not isinstance(record, dict):
+            _audit(request, username, "change_role", "denied")
+            raise HTTPException(status_code=404, detail="User not found")
+        if payload.role != "admin" and _is_last_enabled_admin(users, username):
+            _audit(request, username, "change_role", "denied")
+            raise HTTPException(status_code=409, detail="Cannot demote the last enabled admin")
+        _audit(request, username, "change_role", "attempted")
+        record["role"] = payload.role
+        return record
+
+    try:
+        record = mutate_users(_mutate, strict=True)
+    except ValueError:
+        _audit(request, username, "change_role", "failed")
+        raise HTTPException(status_code=500, detail="User store unavailable")
+    except PersistenceError:
+        _audit(request, username, "change_role", "failed")
+        raise HTTPException(status_code=500, detail="Internal error")
+    revoke_user_sessions(username)
+    _audit(request, username, "change_role", "succeeded")
+    return {"ok": True, "user": _project_user(username, record)}
+
+
+@app.patch("/api/admin/users/{username}/disabled")
+async def admin_set_disabled(username: str, payload: SetDisabledRequest, request: Request):
+    _require_admin(request, "set_disabled")
+    username = _validate_username(username)
+
+    def _mutate(users: dict):
+        record = users.get(username)
+        if not isinstance(record, dict):
+            _audit(request, username, "set_disabled", "denied")
+            raise HTTPException(status_code=404, detail="User not found")
+        if payload.disabled and _is_last_enabled_admin(users, username):
+            _audit(request, username, "set_disabled", "denied")
+            raise HTTPException(status_code=409, detail="Cannot disable the last enabled admin")
+        _audit(request, username, "set_disabled", "attempted")
+        record["disabled"] = bool(payload.disabled)
+        return record
+
+    try:
+        record = mutate_users(_mutate, strict=True)
+    except ValueError:
+        _audit(request, username, "set_disabled", "failed")
+        raise HTTPException(status_code=500, detail="User store unavailable")
+    except PersistenceError:
+        _audit(request, username, "set_disabled", "failed")
+        raise HTTPException(status_code=500, detail="Internal error")
+    revoke_user_sessions(username)
+    _audit(request, username, "set_disabled", "succeeded")
+    return {"ok": True, "user": _project_user(username, record)}
+
+
+@app.post("/api/admin/users/{username}/reset-password")
+async def admin_reset_password(username: str, payload: ResetPasswordRequest, request: Request):
+    _require_admin(request, "reset_password")
+    username = _validate_username(username)
+    _validate_password(payload.password)
+
+    def _mutate(users: dict):
+        record = users.get(username)
+        if not isinstance(record, dict):
+            _audit(request, username, "reset_password", "denied")
+            raise HTTPException(status_code=404, detail="User not found")
+        _audit(request, username, "reset_password", "attempted")
+        new_record = create_password_record(payload.password, record.get("role", "viewer"))
+        new_record["disabled"] = record.get("disabled", False)
+        users[username] = new_record
+        return new_record
+
+    try:
+        new_record = mutate_users(_mutate, strict=True)
+    except ValueError:
+        _audit(request, username, "reset_password", "failed")
+        raise HTTPException(status_code=500, detail="User store unavailable")
+    except PersistenceError:
+        _audit(request, username, "reset_password", "failed")
+        raise HTTPException(status_code=500, detail="Internal error")
+    revoke_user_sessions(username)
+    _audit(request, username, "reset_password", "succeeded")
+    return {"ok": True, "user": _project_user(username, new_record)}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

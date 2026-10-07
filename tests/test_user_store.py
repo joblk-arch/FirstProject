@@ -26,6 +26,7 @@ from app import (
     create_password_record,
     load_users,
     load_users_unlocked,
+    load_users_unlocked_strict,
     mutate_users,
     revoke_user_sessions,
     save_users_atomic,
@@ -566,3 +567,85 @@ class TestConcurrentMutationSafety:
         reader_thread.join()
 
         assert read_errors == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: strict loader (malformed-file safety for admin mutations)
+# ---------------------------------------------------------------------------
+
+class TestStrictLoader:
+    """load_users_unlocked_strict must distinguish a missing file from a
+    malformed one so admin mutations fail safely without overwriting."""
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        assert not fake.exists()
+        assert load_users_unlocked_strict() == {}
+
+    def test_well_formed_file_returns_records(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        fake.write_text(
+            json.dumps(
+                {
+                    "alice": {"role": "admin", "salt": "s", "password_hash": "h"},
+                    "bob": {"role": "viewer", "salt": "s", "password_hash": "h"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        result = load_users_unlocked_strict()
+        assert set(result) == {"alice", "bob"}
+        assert result["alice"]["role"] == "admin"
+
+    def test_invalid_json_raises(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        fake.write_text("{ this is not valid json", encoding="utf-8")
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        with pytest.raises(ValueError):
+            load_users_unlocked_strict()
+
+    def test_non_dict_top_level_raises(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        fake.write_text(json.dumps([{"role": "admin"}]), encoding="utf-8")
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        with pytest.raises(ValueError):
+            load_users_unlocked_strict()
+
+    def test_non_dict_record_raises(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        fake.write_text(json.dumps({"alice": "not-a-dict"}), encoding="utf-8")
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        with pytest.raises(ValueError):
+            load_users_unlocked_strict()
+
+    def test_invalid_role_record_raises(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        fake.write_text(json.dumps({"alice": {"role": "superuser"}}), encoding="utf-8")
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        with pytest.raises(ValueError):
+            load_users_unlocked_strict()
+
+    def test_unreadable_file_raises(self, tmp_path, monkeypatch):
+        fake = tmp_path / "users.json"
+        fake.write_text(json.dumps({"alice": {"role": "admin"}}), encoding="utf-8")
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        fake.chmod(0o000)
+        try:
+            with pytest.raises(ValueError):
+                load_users_unlocked_strict()
+        finally:
+            fake.chmod(0o644)
+
+    def test_strict_vs_lenient_divergence_on_malformed(self, tmp_path, monkeypatch):
+        """The lenient loader returns {} on malformed; the strict loader raises.
+        This divergence is what lets admin mutations fail safely."""
+        fake = tmp_path / "users.json"
+        fake.write_text("{ broken", encoding="utf-8")
+        monkeypatch.setattr("app.USERS_FILE", fake)
+        # Lenient: silently empty (legacy behavior preserved).
+        assert load_users_unlocked() == {}
+        # Strict: raises so a mutation can abort without overwriting.
+        with pytest.raises(ValueError):
+            load_users_unlocked_strict()
