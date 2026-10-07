@@ -1,0 +1,73 @@
+/* Admin-only User management panel. Dark theme matching the dashboard.
+ * Self-contained: reuses :root tokens from styles.css, defines its own
+ * button/modal helpers so shared styles.css is left untouched. */
+
+#user-management{margin-top:12px}
+#user-management[hidden]{display:none}
+
+/* Buttons (self-contained; dashboard has no .btn class) */
+.btn{background:transparent;border:1px solid #3a5161;color:var(--text);padding:10px 16px;border-radius:8px;font:inherit;cursor:pointer;font-size:.88rem}
+.btn:hover,.btn:focus-visible{border-color:var(--teal);outline:none}
+.btn:disabled{cursor:wait;opacity:.55}
+.btn-primary{background:var(--teal);border-color:var(--teal);color:#04110f;font-weight:700}
+.btn-primary:hover,.btn-primary:focus-visible{background:#7ff0dd;border-color:#7ff0dd;color:#04110f}
+.btn-sm{padding:6px 12px;font-size:.8rem;border-radius:7px}
+.btn-danger{border-color:var(--red);color:var(--red)}
+.btn-danger:hover,.btn-danger:focus-visible{border-color:#ff9aa8;color:#ff9aa8}
+
+/* Create form */
+.user-create-form{margin-bottom:18px}
+.user-create-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:14px;align-items:end}
+.user-create-grid .build-field{min-width:0}
+.user-create-grid .build-field input,.user-create-grid .build-field select{width:100%}
+.user-create-actions{display:grid;gap:6px}
+.user-create-actions .btn{width:100%}
+
+.user-status{margin:12px 0 0;font-size:.84rem;color:var(--teal);min-height:1.2em}
+.user-error{margin:12px 0 0;font-size:.84rem;color:var(--red);min-height:1.2em}
+.user-status:empty,.user-error:empty{margin:0}
+
+/* Table */
+#user-management .table-wrap{margin-top:4px}
+#user-management td{white-space:normal}
+#user-management td code{font-size:.82rem;color:var(--text);overflow-wrap:anywhere}
+.role-select{background:#0a151f;border:1px solid var(--line);border-radius:8px;padding:7px 10px;color:var(--text);font:inherit;font-size:.84rem;max-width:150px}
+.role-select:focus{border-color:var(--teal);outline:none}
+.role-select:disabled{opacity:.5;cursor:not-allowed}
+.row-actions{display:flex;gap:8px;flex-wrap:wrap}
+
+/* Enabled/disabled status pill */
+.user-status-pill{display:inline-flex;align-items:center;gap:7px;font-size:.82rem}
+.user-status-pill:before{content:"";width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.user-status-pill.enabled{color:var(--teal)}
+.user-status-pill.enabled:before{background:var(--teal)}
+.user-status-pill.disabled{color:var(--red)}
+.user-status-pill.disabled:before{background:var(--red)}
+
+/* Modals (div-based overlay; toggled via the hidden attribute) */
+.um-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:#02070ba8;backdrop-filter:blur(3px);padding:20px}
+.um-modal[hidden]{display:none}
+.um-modal-card{width:min(440px,100%);background:#08131d;border:1px solid var(--line);border-radius:12px;padding:24px;display:grid;gap:12px}
+.um-modal-card h3{font-size:1.1rem;margin:0}
+.um-modal-card .eyebrow{margin:0 0 2px}
+.um-modal-text{margin:0;color:var(--muted);font-size:.86rem}
+.um-modal-card label{color:var(--muted);font-size:.78rem;font-weight:600}
+.um-modal-card input{background:#0a151f;border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--text);font:inherit;font-size:.88rem;width:100%}
+.um-modal-card input:focus{border-color:var(--teal);outline:none}
+.um-modal-card input:disabled{opacity:.5;cursor:not-allowed}
+.um-modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:4px}
+
+/* Mobile layout */
+@media(max-width:800px){
+  .user-create-grid{grid-template-columns:1fr 1fr}
+  .user-create-actions{grid-column:1/-1}
+  .um-modal{padding:14px}
+  .um-modal-card{padding:18px}
+  .um-modal-actions{flex-direction:column-reverse}
+  .um-modal-actions .btn{width:100%}
+  .row-actions{width:100%}
+}
+@media(max-width:480px){
+  .user-create-grid{grid-template-columns:1fr}
+  #user-management .table-wrap{font-size:.82rem}
+}

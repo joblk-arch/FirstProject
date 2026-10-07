@@ -516,6 +516,9 @@ async function loadSession() {
     setBuildDisabled(false);
     $('build-permission-hint').textContent = '';
   }
+  if (sessionIdentity.role === 'admin' && typeof window.initUserManagement === 'function') {
+    window.initUserManagement(sessionIdentity);
+  }
 }
 
 async function logout() {

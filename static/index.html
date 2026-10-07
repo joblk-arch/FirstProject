@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/efficiency.css?v=agent-efficiency-1">
   <link rel="stylesheet" href="/access.css">
+  <link rel="stylesheet" href="/user-management.css">
 </head>
 <body>
   <header class="topbar">
@@ -109,6 +110,43 @@
         <div id="models" class="stack"></div>
       </section>
     </div>
+    <section class="panel span-2" id="user-management" hidden aria-labelledby="user-management-title">
+      <div class="panel-head">
+        <div><p class="eyebrow">USER MANAGEMENT</p><h2 id="user-management-title">Accounts</h2></div>
+        <span class="hint">Admin only</span>
+      </div>
+      <form id="user-create-form" class="user-create-form" novalidate>
+        <div class="user-create-grid">
+          <div class="build-field">
+            <label for="new-username">Username</label>
+            <input id="new-username" name="username" type="text" autocomplete="off" required maxlength="32" pattern="[a-z0-9][a-z0-9._-]{0,31}">
+          </div>
+          <div class="build-field">
+            <label for="new-password">Password</label>
+            <input id="new-password" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="128">
+          </div>
+          <div class="build-field">
+            <label for="new-role">Role</label>
+            <select id="new-role" name="role">
+              <option value="viewer">viewer</option>
+              <option value="operator">operator</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+          <div class="build-field user-create-actions">
+            <button type="submit" id="create-user-btn" class="btn btn-primary">Create user</button>
+          </div>
+        </div>
+        <p id="user-status" class="user-status" role="status" aria-live="polite"></p>
+        <p id="user-error" class="user-error" role="alert" aria-live="assertive"></p>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="user-table-body"></tbody>
+        </table>
+      </div>
+    </section>
     <p class="error" id="error" role="alert" hidden></p>
   </main>
   <dialog id="workflow-dialog" class="workflow-dialog" aria-labelledby="workflow-title">
@@ -120,6 +158,34 @@
       <div id="workflow-content" class="drawer-content" aria-live="polite"></div>
     </div>
   </dialog>
+  <div id="user-confirm-modal" class="um-modal" hidden>
+    <div class="um-modal-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <p class="eyebrow">CONFIRM</p>
+      <h3 id="confirm-title">Confirm</h3>
+      <p id="confirm-text" class="um-modal-text"></p>
+      <label for="confirm-username">Type the username to confirm</label>
+      <input id="confirm-username" type="text" autocomplete="off" maxlength="32">
+      <p id="confirm-error" class="user-error" role="alert" aria-live="assertive"></p>
+      <div class="um-modal-actions">
+        <button id="confirm-cancel" type="button" class="btn">Cancel</button>
+        <button id="confirm-ok" type="button" class="btn btn-primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+  <div id="user-password-modal" class="um-modal" hidden>
+    <div class="um-modal-card" role="dialog" aria-modal="true" aria-labelledby="pw-title">
+      <p class="eyebrow">RESET PASSWORD</p>
+      <h3 id="pw-title">Reset password</h3>
+      <label for="pw-new">New password</label>
+      <input id="pw-new" type="password" autocomplete="new-password" minlength="12" maxlength="128">
+      <p id="pw-error" class="user-error" role="alert" aria-live="assertive"></p>
+      <div class="um-modal-actions">
+        <button id="pw-cancel" type="button" class="btn">Cancel</button>
+        <button id="pw-ok" type="button" class="btn btn-primary">Reset</button>
+      </div>
+    </div>
+  </div>
   <script src="/app.js?v=continuation-jobs-1" defer></script>
+  <script src="/user-management.js" defer></script>
 </body>
 </html>
