@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import Response, JSONResponse, HTMLResponse
 
 import asyncio
+import tempfile
 import time
 import urllib.parse
 
@@ -50,6 +51,97 @@ BUILD_ROLES = {"operator", "admin"}
 VALID_ROLES = {"viewer", "operator", "admin"}
 _audit_lock = threading.Lock()
 _templates_lock = threading.Lock()
+_users_lock = threading.Lock()
+
+# --- Password hashing constants ---
+PASSWORD_ALGORITHM = "sha256"
+PASSWORD_SALT_BYTES = 32
+PASSWORD_ITERATIONS = 600_000
+
+
+def create_password_record(password: str, role: str) -> dict:
+    """Create a PBKDF2-SHA256 password record compatible with _verify_password.
+
+    Pure factory; does not write to disk.
+    """
+    salt = os.urandom(PASSWORD_SALT_BYTES)
+    dk = hashlib.pbkdf2_hmac(PASSWORD_ALGORITHM, password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return {
+        "role": role,
+        "salt": salt.hex(),
+        "password_hash": dk.hex(),
+        "iterations": PASSWORD_ITERATIONS,
+    }
+
+
+def load_users_unlocked() -> dict:
+    """Load and validate the users JSON file. Caller must hold _users_lock.
+
+    Returns an empty dict on any failure. Drops records missing a valid "role".
+    """
+    try:
+        data = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    validated = {}
+    for username, record in data.items():
+        if not isinstance(record, dict):
+            continue
+        role = record.get("role")
+        if not isinstance(role, str) or role not in VALID_ROLES:
+            continue
+        validated[username] = record
+    return validated
+
+
+def load_users() -> dict:
+    """Load and validate the users JSON file (acquires _users_lock)."""
+    with _users_lock:
+        return load_users_unlocked()
+
+
+def save_users_atomic(users: dict) -> None:
+    """Atomically persist the users dict to USERS_FILE.
+
+    Caller must hold _users_lock. Uses same-directory temp file + fsync +
+    chmod 0600 + os.replace for atomicity and durability.
+    """
+    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(USERS_FILE.parent), prefix=".users_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(users, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, str(USERS_FILE))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def mutate_users(mutator) -> None:
+    """Apply a mutation to the users dict under the users lock.
+
+    Loads current users, calls mutator(users_dict), then saves atomically.
+    """
+    with _users_lock:
+        users = load_users_unlocked()
+        mutator(users)
+        save_users_atomic(users)
+
+
+def revoke_user_sessions(username: str) -> None:
+    """Invalidate all active sessions for the given username."""
+    with _session_lock:
+        to_remove = [k for k, v in _sessions.items() if v["username"] == username]
+        for k in to_remove:
+            del _sessions[k]
 
 # --- Session store ---
 
@@ -401,7 +493,11 @@ def authenticate_identity(credentials: HTTPBasicCredentials) -> tuple[str, str]:
         except (OSError, json.JSONDecodeError):
             raise ValueError("Invalid credentials")
         record = users.get(credentials.username) if isinstance(users, dict) else None
-        if not isinstance(record, dict) or not _verify_password(credentials.password, record):
+        if not isinstance(record, dict):
+            raise ValueError("Invalid credentials")
+        if record.get("disabled"):
+            raise ValueError("Invalid credentials")
+        if not _verify_password(credentials.password, record):
             raise ValueError("Invalid credentials")
         return credentials.username, record["role"]
 
