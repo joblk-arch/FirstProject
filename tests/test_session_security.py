@@ -586,3 +586,16 @@ def test_login_rate_limit_sweeps_stale_keys():
         assert "10.0.0.2" in app._login_attempts
         # The new key was added
         assert "10.0.0.99" in app._login_attempts
+
+
+def test_login_page_contains_session_note(users_file):
+    """GET / with Accept: text/html returns the session note and aria-describedby."""
+    with patch.object(app, "USERS_FILE", users_file):
+        client = TestClient(app.app)
+        resp = client.get("/", headers={"Accept": "text/html"})
+        assert resp.status_code == 200
+        body = resp.text
+        assert "Signing in ends any previous session for this account." in body
+        assert 'id="login-session-note"' in body
+        assert body.count('id="login-session-note"') == 1
+        assert 'aria-describedby="login-session-note"' in body

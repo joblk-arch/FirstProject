@@ -18,6 +18,7 @@
     .login-submit{width:100%;padding:12px;background:var(--teal);border-color:var(--teal);color:#04110f;font-weight:700;font-size:.92rem;margin-top:8px}
     .login-submit:disabled{opacity:.5;cursor:wait}
     .login-error{color:var(--red);font-size:.84rem;margin:12px 0 0;min-height:1.2em}
+    #login-session-note{color:var(--muted);font-size:.78rem;margin:0 0 16px}
     .login-brand{display:flex;align-items:center;gap:10px;margin-bottom:24px}
     .login-brand .mark{width:32px;height:32px;border:2px solid var(--teal);clip-path:polygon(50% 0,100% 26%,100% 75%,50% 100%,0 75%,0 26%)}
     .login-brand div{display:grid}
@@ -34,7 +35,8 @@
       </div>
       <h1>Sign in</h1>
       <p class="subtitle">Enter your credentials to access the dashboard.</p>
-      <form id="login-form" novalidate>
+      <p id="login-session-note">Signing in ends any previous session for this account.</p>
+      <form id="login-form" novalidate aria-describedby="login-session-note">
         <div class="login-field">
           <label for="login-username">Username</label>
           <input type="text" id="login-username" name="username" required autocomplete="username" autofocus>
