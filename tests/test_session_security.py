@@ -588,11 +588,12 @@ def test_login_rate_limit_sweeps_stale_keys():
         assert "10.0.0.99" in app._login_attempts
 
 
-def test_login_page_contains_session_note(users_file):
+@pytest.mark.parametrize("path", ["/", "/index.html"])
+def test_login_page_contains_session_note(users_file, path):
     """GET / with Accept: text/html returns the session note and aria-describedby."""
     with patch.object(app, "USERS_FILE", users_file):
         client = TestClient(app.app)
-        resp = client.get("/", headers={"Accept": "text/html"})
+        resp = client.get(path, headers={"Accept": "text/html"})
         assert resp.status_code == 200
         body = resp.text
         assert "Signing in ends any previous session for this account." in body
