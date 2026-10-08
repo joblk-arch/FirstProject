@@ -811,3 +811,52 @@ class TestMutateUsersStrict:
 
         result = app_module.mutate_users(_mutator, strict=True)
         assert result == "mutated"
+
+
+# ---------------------------------------------------------------------------
+# Regression: disabled admin must not count as an enabled administrator.
+# A disabled admin (admin2) must not protect admin1 from demotion/disable.
+# ---------------------------------------------------------------------------
+
+class TestDisabledAdminNotCountedAsEnabled:
+    """When admin2 is a disabled admin, admin1 is the only *enabled* admin.
+    Mutations that would remove the last enabled admin must be rejected with
+    409, the users file must remain byte-for-byte unchanged, and admin1's
+    session must remain valid."""
+
+    @pytest.mark.parametrize(
+        "method, path, payload",
+        [
+            ("patch", "/api/admin/users/admin1", {"role": "viewer"}),
+            ("patch", "/api/admin/users/admin1/disabled", {"disabled": True}),
+        ],
+    )
+    def test_disabled_admin_not_counted(self, tmp_env, method, path, payload):
+        import app as app_module
+        _seed_user("admin1", "admin")
+        _seed_user("admin2", "admin")
+        # Disable admin2 so it does not count as an enabled administrator.
+        app_module.mutate_users(
+            lambda users: users["admin2"].update({"disabled": True}),
+            strict=True,
+        )
+
+        client = TestClient(app)
+        token = _csrf(client, "admin1")
+
+        before = app_module.USERS_FILE.read_bytes()
+
+        resp = getattr(client, method)(
+            path, json=payload, headers={"X-CSRF-Token": token}
+        )
+        assert resp.status_code == 409
+
+        # File must be byte-for-byte unchanged after the rejected mutation.
+        assert app_module.USERS_FILE.read_bytes() == before
+
+        # admin1's session must still work after the rejection.
+        session = client.get("/api/session")
+        assert session.status_code == 200
+        data = session.json()
+        assert data["username"] == "admin1"
+        assert data["role"] == "admin"
