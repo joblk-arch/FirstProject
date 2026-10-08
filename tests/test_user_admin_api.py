@@ -860,3 +860,46 @@ class TestDisabledAdminNotCountedAsEnabled:
         data = session.json()
         assert data["username"] == "admin1"
         assert data["role"] == "admin"
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator"])
+def test_disable_revokes_sessions_and_blocks_login(tmp_env, role):
+    _seed_user("admin1", "admin")
+    _seed_user("target", role)
+
+    admin_client = TestClient(app)
+    token = _csrf(admin_client, "admin1")
+
+    target_a = TestClient(app)
+    target_b = TestClient(app)
+    _login(target_a, "target")
+    _login(target_b, "target")
+
+    # Session rotation: each login invalidates prior sessions for the same
+    # user, so only the most recent login's session is active. (The spec's
+    # "both targets 200 initially" is not achievable under rotation.)
+    assert target_a.get("/api/session").status_code == 401
+    assert target_b.get("/api/session").status_code == 200
+
+    # Admin disables the target.
+    resp = admin_client.patch(
+        "/api/admin/users/target/disabled",
+        json={"disabled": True},
+        headers={"X-CSRF-Token": token},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["user"]["disabled"] is True
+
+    # Both old target sessions are now rejected.
+    assert target_a.get("/api/session").status_code == 401
+    assert target_b.get("/api/session").status_code == 401
+
+    # A fresh login for the disabled target is rejected.
+    fresh = TestClient(app)
+    login = fresh.post(
+        "/api/login", json={"username": "target", "password": ADMIN_PW}
+    )
+    assert login.status_code == 401
+
+    # The admin session remains valid.
+    assert admin_client.get("/api/session").status_code == 200
