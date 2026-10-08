@@ -2873,7 +2873,7 @@ def test_cluster_health_exact_payload_shape(tmp_path: Path, auth_headers):
     assert set(data["lm_studio"].keys()) == {"status", "models", "last_checked", "detail"}
     for m in data["lm_studio"]["models"]:
         assert set(m.keys()) == {"id", "loaded"}
-    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "workflow_efficiency", "needs_continuation", "duplicate_tool_call_warning_threshold", "last_checked", "detail"}
+    assert set(data["agent_queue"].keys()) == {"queued", "running", "running_jobs", "current_job", "workflow_efficiency", "needs_continuation", "duplicate_tool_call_warning_threshold", "status_counts", "last_checked", "detail"}
 
 
 def test_cluster_health_never_leaks_secrets_or_urls(tmp_path: Path, auth_headers):
@@ -3389,6 +3389,40 @@ def test_frontend_css_cluster_health_responsive():
     assert ".health-overall.status.degraded" in css
     assert ".health-overall.status.offline" in css
     assert ".health-overall.status.unknown" in css
+
+
+def test_frontend_html_reliability_card():
+    """index.html exposes the all-time job status counts card with accessible region semantics."""
+    html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="reliability-card"' in html
+    assert 'role="region"' in html
+    assert 'aria-label="All-time job status counts"' in html
+
+
+def test_frontend_js_reliability_card():
+    """app.js renders the reliability card, explains the caveat, and maps null to Unavailable."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(encoding="utf-8")
+    assert "reliability-card" in js
+    assert "All-time job status counts" in js
+    # The card must explain that completed does not mean merged and that totals include canaries.
+    assert "Completed does not mean merged" in js
+    assert "historical canaries" in js
+    # Reads the projected status_counts and renders all three known statuses.
+    assert "status_counts" in js
+    assert "sc.completed" in js
+    assert "sc.failed" in js
+    assert "sc.blocked" in js
+    # null/undefined values must render as "Unavailable", never a false zero.
+    assert "'Unavailable'" in js
+
+
+def test_frontend_css_reliability_card():
+    """The reliability card is styled and its grid collapses responsively."""
+    css = (Path(__file__).resolve().parent.parent / "static" / "styles.css").read_text(encoding="utf-8")
+    assert ".reliability-card" in css
+    assert ".reliability-grid" in css
+    assert ".reliability-note" in css
+    assert "@media" in css
 
 
 # --- Repair visibility: _safe_bool and _safe_nonneg_int ---
@@ -5601,3 +5635,150 @@ class TestIndexHtmlVersionedUrl:
         src = self._read_index()
         # Must have a version query parameter on app.js
         assert "app.js?v=" in src or "app.js?version=" in src or "app.js?v=" in src
+
+
+class TestAggregateStatusCounts:
+    """Tests for the _aggregate_status_counts helper."""
+
+    def test_valid_counts_summed_across_projects(self):
+        counts = [
+            {"project": "a", "status": "completed", "count": 5},
+            {"project": "b", "status": "completed", "count": 3},
+            {"project": "a", "status": "failed", "count": 2},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": 8, "failed": 2, "blocked": 0}
+
+    def test_absent_status_is_zero(self):
+        counts = [{"project": "a", "status": "completed", "count": 1}]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": 1, "failed": 0, "blocked": 0}
+
+    def test_none_input_returns_all_none(self):
+        result = app._aggregate_status_counts(None)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_non_list_input_returns_all_none(self):
+        result = app._aggregate_status_counts("not a list")
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_bool_count_returns_null(self):
+        """Bool count for a known status is invalid; return all-None."""
+        counts = [
+            {"project": "a", "status": "completed", "count": True},
+            {"project": "b", "status": "completed", "count": 3},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_negative_count_returns_null(self):
+        """Negative count for a known status is invalid; return all-None."""
+        counts = [
+            {"project": "a", "status": "failed", "count": -5},
+            {"project": "b", "status": "failed", "count": 2},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_malformed_row_returns_null(self):
+        """Non-dict rows are malformed; return all-None."""
+        counts = [
+            "not a dict",
+            None,
+            42,
+            {"project": "a", "status": "completed", "count": 1},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_unknown_status_ignored(self):
+        counts = [
+            {"project": "a", "status": "running", "count": 10},
+            {"project": "a", "status": "completed", "count": 1},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": 1, "failed": 0, "blocked": 0}
+
+    def test_non_string_status_returns_null(self):
+        """Non-string status is malformed; return all-None."""
+        counts = [
+            {"project": "a", "status": 123, "count": 5},
+            {"project": "a", "status": None, "count": 5},
+            {"project": "a", "status": "completed", "count": 2},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_empty_list_returns_zeros(self):
+        result = app._aggregate_status_counts([])
+        assert result == {"completed": 0, "failed": 0, "blocked": 0}
+
+    def test_output_always_has_three_keys(self):
+        result = app._aggregate_status_counts(None)
+        assert set(result.keys()) == {"completed", "failed", "blocked"}
+        result = app._aggregate_status_counts([])
+        assert set(result.keys()) == {"completed", "failed", "blocked"}
+
+    def test_over_bound_count_returns_null(self):
+        """Over-bound count for a known status is invalid; return all-None."""
+        counts = [
+            {"project": "a", "status": "completed", "count": 99999999999},
+            {"project": "b", "status": "completed", "count": 1},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_summed_total_over_bound_returns_null(self):
+        """If summed totals exceed the safe bound, return all-None."""
+        counts = [
+            {"project": "a", "status": "completed", "count": 6_000_000},
+            {"project": "b", "status": "completed", "count": 6_000_000},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": None, "failed": None, "blocked": None}
+
+    def test_summed_total_at_bound_is_valid(self):
+        """If summed totals equal the safe bound exactly, it is valid."""
+        counts = [
+            {"project": "a", "status": "completed", "count": 5_000_000},
+            {"project": "b", "status": "completed", "count": 5_000_000},
+        ]
+        result = app._aggregate_status_counts(counts)
+        assert result == {"completed": 10_000_000, "failed": 0, "blocked": 0}
+
+
+class TestProjectAgentQueueStatusCounts:
+    """Tests that _project_agent_queue includes status_counts in its output."""
+
+    def test_status_counts_included(self):
+        gateway_data = {
+            "counts": [
+                {"project": "a", "status": "completed", "count": 5},
+                {"project": "b", "status": "failed", "count": 2},
+            ]
+        }
+        result = app._project_agent_queue(gateway_data)
+        assert result["status_counts"] == {"completed": 5, "failed": 2, "blocked": 0}
+
+    def test_status_counts_none_when_missing(self):
+        gateway_data = {}
+        result = app._project_agent_queue(gateway_data)
+        assert result["status_counts"] == {"completed": None, "failed": None, "blocked": None}
+
+    def test_status_counts_none_when_gateway_present_but_counts_missing(self):
+        """A truthy gateway payload that omits counts must still report Unavailable, not false zero."""
+        gateway_data = {"jobs": [{"id": "j1", "status": "running"}]}
+        result = app._project_agent_queue(gateway_data)
+        assert result["status_counts"] == {"completed": None, "failed": None, "blocked": None}
+
+    def test_status_counts_none_when_counts_malformed(self):
+        """A truthy gateway payload with a non-list counts value must report Unavailable."""
+        gateway_data = {"jobs": [], "counts": "not-a-list"}
+        result = app._project_agent_queue(gateway_data)
+        assert result["status_counts"] == {"completed": None, "failed": None, "blocked": None}
+
+    def test_status_counts_zero_when_counts_empty_list(self):
+        """A valid empty counts list is available data, so absent statuses render as zero."""
+        gateway_data = {"jobs": [], "counts": []}
+        result = app._project_agent_queue(gateway_data)
+        assert result["status_counts"] == {"completed": 0, "failed": 0, "blocked": 0}

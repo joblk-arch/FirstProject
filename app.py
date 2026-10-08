@@ -1559,6 +1559,41 @@ def _project_continuation_job(job: dict) -> dict:
     }
 
 
+def _aggregate_status_counts(counts: object) -> dict:
+    """Aggregate per-project status counts into a safe all-time summary.
+
+    ``counts`` is expected to be a list of ``{project, status, count}`` rows
+    from the gateway.  Returns a dict with keys ``completed``, ``failed``,
+    and ``blocked``.  Each value is an ``int`` (summed across projects) or
+    ``None`` when the data is structurally invalid or contains invalid
+    known-status counts.  Structurally valid unknown string statuses are
+    ignored.  Returns all-None if any row is non-dict, any status is
+    non-string, any known-status count is invalid (bool, negative, non-int,
+    over-bound), or summed totals exceed the safe bound.
+    """
+    _KNOWN = ("completed", "failed", "blocked")
+    _NULL = {s: None for s in _KNOWN}
+    if not isinstance(counts, list):
+        return dict(_NULL)
+    totals = {s: 0 for s in _KNOWN}
+    for row in counts:
+        if not isinstance(row, dict):
+            return dict(_NULL)
+        status = row.get("status")
+        if not isinstance(status, str):
+            return dict(_NULL)
+        if status not in _KNOWN:
+            continue  # structurally valid unknown string status: ignore
+        count = _safe_metric_count(row.get("count"))
+        if count is None:
+            return dict(_NULL)
+        totals[status] += count
+    for v in totals.values():
+        if v > 10_000_000:
+            return dict(_NULL)
+    return totals
+
+
 def _project_agent_queue(gateway_data: dict) -> dict:
     """Project gateway dashboard data to a safe agent queue summary.
 
@@ -1573,6 +1608,7 @@ def _project_agent_queue(gateway_data: dict) -> dict:
             "current_job": None, "workflow_efficiency": [],
             "needs_continuation": [],
             "duplicate_tool_call_warning_threshold": DUPLICATE_TOOL_CALL_WARNING_THRESHOLD,
+            "status_counts": {"completed": None, "failed": None, "blocked": None},
             "last_checked": now, "detail": "unavailable",
         }
     jobs = gateway_data.get("jobs", [])
@@ -1598,6 +1634,8 @@ def _project_agent_queue(gateway_data: dict) -> dict:
         for workflow in workflows
         if isinstance(workflow, dict)
     ][:5]
+    counts = gateway_data.get("counts")
+    status_counts = _aggregate_status_counts(counts)
     return {
         "queued": queued,
         "running": running,
@@ -1606,6 +1644,7 @@ def _project_agent_queue(gateway_data: dict) -> dict:
         "workflow_efficiency": workflow_efficiency,
         "needs_continuation": needs_continuation,
         "duplicate_tool_call_warning_threshold": DUPLICATE_TOOL_CALL_WARNING_THRESHOLD,
+        "status_counts": status_counts,
         "last_checked": now,
         "detail": None,
     }

@@ -53,6 +53,7 @@ function render(data) {
   const repairSystemCls = repairEnabled ? (repairActivated ? 'repair-active' : 'repair-enabled') : 'repair-off';
   const repairSystem = `<article class="metric"><span>Auto-repair</span><strong class="repair-system ${repairSystemCls}">${safe(repairSystemLabel)}</strong></article>`;
   $('metrics').innerHTML = [['Active work',active],['Projects',data.projects.length],['Recorded tokens',fmt(tokens)],['Needs attention',failed]].map(([key,value]) => `<article class="metric"><span>${key}</span><strong>${value}</strong></article>`).join('') + repairSystem;
+  // status_counts card is rendered in renderClusterHealth (it comes from /api/cluster-health)
   $('jobs').innerHTML = jobs.length ? jobs.slice(0,20).map((job) => {
     const label = safe(job.stage || job.role);
     const stage = job.workflow_id ? `<button class="workflow-link" type="button" data-workflow-id="${safe(job.workflow_id)}" aria-label="Open ${label} workflow details">${label}</button>` : label;
@@ -470,6 +471,20 @@ function renderClusterHealth(data) {
   const continuations = Array.isArray(agentQueue.needs_continuation) ? agentQueue.needs_continuation : [];
   const continuationSection = continuations.length ? `<article class="health-card health-card-wide"><div class="health-card-head"><span class="status degraded">needs continuation</span><span class="health-latency">${safe(continuations.length)} job(s)</span></div><ul class="health-efficiency-list" aria-label="Jobs needing continuation">${continuations.map((job) => `<li><code>${safe(job.id || '—')}</code><span>${safe(job.project || '—')} · ${safe(job.stage || '—')}</span><span>${safe(job.steps_used == null ? '—' : job.steps_used)} steps</span><span>${job.source_mutated ? 'source changed' : 'no source change'} · ${job.test_ran ? 'tests ran' : 'tests not run'}</span>${job.workflow_id ? `<button type="button" data-workflow-id="${safe(job.workflow_id)}">Review and retry</button>` : ''}</li>`).join('')}</ul></article>` : '';
   container.innerHTML = `${overallBadge}<div class="health-cards">${serviceCards}${lmSection}${queueSection}${efficiencySection}${continuationSection}</div>`;
+  renderStatusCountsCard(agentQueue.status_counts);
+}
+
+function renderStatusCountsCard(statusCounts) {
+  const card = $('reliability-card');
+  if (!card) return;
+  const _SAFE_BOUND = 10000000;
+  const safeCount = (v) => {
+    if (v === null || v === undefined) return 'Unavailable';
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > _SAFE_BOUND) return 'Unavailable';
+    return String(v);
+  };
+  const sc = statusCounts || {};
+  card.innerHTML = `<h2>All-time job status counts</h2><p class="reliability-note">Completed does not mean merged; totals include historical canaries.</p><div class="reliability-grid">${[['Completed',sc.completed],['Failed',sc.failed],['Blocked',sc.blocked]].map(([label,val]) => `<article class="metric"><span>${label}</span><strong>${safeCount(val)}</strong></article>`).join('')}</div>`;
 }
 
 function renderClusterHealthError() {
@@ -477,6 +492,7 @@ function renderClusterHealthError() {
   if (!container) return;
   $('health-timestamp').textContent = '';
   container.innerHTML = `<div class="health-overall status offline"><span>unavailable</span></div><p class="muted-copy">Health check could not be completed.</p>`;
+  renderStatusCountsCard(null);
 }
 
 async function load() {
