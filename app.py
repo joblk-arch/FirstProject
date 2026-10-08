@@ -711,6 +711,28 @@ async def require_authentication(request: Request, call_next):
         )
 
 
+# --- Cache-Control for HTML dashboard/login pages ---
+_HTML_NO_STORE_PATHS = {"/", "/index.html", "/login.html"}
+
+
+@app.middleware("http")
+async def cache_control_html(request: Request, call_next):
+    """Add Cache-Control: no-store to HTML responses for dashboard entry paths.
+
+    This middleware is outermost (decorated last) so it sees early HTML
+    returns from require_authentication (login page) as well as normal
+    authenticated page responses. Only affects text/html responses on
+    exact-match paths; JSON, JS, CSS and versioned static assets are
+    untouched.
+    """
+    response = await call_next(request)
+    if request.url.path in _HTML_NO_STORE_PATHS:
+        content_type = response.headers.get("content-type", "")
+        if content_type.startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 async def _serve_login_page(request: Request) -> HTMLResponse:
     """Serve the login page for unauthenticated browser navigation."""
     return HTMLResponse(content=_get_login_page_html(), status_code=200)

@@ -5785,3 +5785,112 @@ class TestProjectAgentQueueStatusCounts:
         gateway_data = {"jobs": [], "counts": []}
         result = app._project_agent_queue(gateway_data)
         assert result["status_counts"] == {"completed": 0, "failed": 0, "blocked": 0}
+
+
+class TestHTMLCacheControl:
+    """Verify Cache-Control: no-store on HTML dashboard/login pages only."""
+
+    def test_authenticated_root_html_no_store(self, password_file, gateway_key_file, auth_headers):
+        """Authenticated GET / returns HTML with Cache-Control: no-store."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/", headers=auth_headers)
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("text/html")
+            assert resp.headers.get("cache-control") == "no-store"
+
+    def test_authenticated_index_html_no_store(self, password_file, gateway_key_file, auth_headers):
+        """Authenticated GET /index.html returns HTML with Cache-Control: no-store."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/index.html", headers=auth_headers)
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("text/html")
+            assert resp.headers.get("cache-control") == "no-store"
+
+    def test_unauthenticated_root_html_no_store(self, password_file, gateway_key_file):
+        """Unauthenticated GET / returns login HTML with Cache-Control: no-store."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/", headers={"accept": "text/html"})
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("text/html")
+            assert resp.headers.get("cache-control") == "no-store"
+
+    def test_unauthenticated_index_html_no_store(self, password_file, gateway_key_file):
+        """Unauthenticated GET /index.html returns login HTML with Cache-Control: no-store."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/index.html", headers={"accept": "text/html"})
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("text/html")
+            assert resp.headers.get("cache-control") == "no-store"
+
+    def test_unauthenticated_login_html_no_store(self, password_file, gateway_key_file):
+        """Unauthenticated GET /login.html returns login HTML with Cache-Control: no-store."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/login.html", headers={"accept": "text/html"})
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("text/html")
+            assert resp.headers.get("cache-control") == "no-store"
+
+    def test_api_json_no_cache_control_header(self, password_file, gateway_key_file, auth_headers):
+        """API JSON responses do NOT get Cache-Control: no-store."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/api/session", headers=auth_headers)
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("application/json")
+            assert resp.headers.get("cache-control") != "no-store"
+
+    def test_static_js_no_cache_control_header(self, password_file, gateway_key_file, auth_headers):
+        """Static JS assets do NOT get Cache-Control: no-store."""
+        # Find a JS file in static
+        import os
+        static_dir = os.path.join(os.path.dirname(app.__file__), "static")
+        js_files = []
+        for root, _dirs, files in os.walk(static_dir):
+            for f in files:
+                if f.endswith(".js"):
+                    js_files.append(os.path.relpath(os.path.join(root, f), static_dir))
+        if js_files:
+            with patch.object(app, "PASSWORD_FILE", password_file):
+                client = TestClient(app.app)
+                path = "/" + js_files[0].replace(os.sep, "/")
+                resp = client.get(path, headers=auth_headers)
+                assert resp.status_code == 200
+                assert resp.headers.get("cache-control") != "no-store"
+
+    def test_static_css_no_cache_control_header(self, password_file, gateway_key_file, auth_headers):
+        """Static CSS assets do NOT get Cache-Control: no-store."""
+        import os
+        static_dir = os.path.join(os.path.dirname(app.__file__), "static")
+        css_files = []
+        for root, _dirs, files in os.walk(static_dir):
+            for f in files:
+                if f.endswith(".css"):
+                    css_files.append(os.path.relpath(os.path.join(root, f), static_dir))
+        if css_files:
+            with patch.object(app, "PASSWORD_FILE", password_file):
+                client = TestClient(app.app)
+                path = "/" + css_files[0].replace(os.sep, "/")
+                resp = client.get(path, headers=auth_headers)
+                assert resp.status_code == 200
+                assert resp.headers.get("cache-control") != "no-store"
+
+    def test_auth_behavior_unchanged_unauthenticated_json(self, password_file, gateway_key_file):
+        """Unauthenticated API request still returns 401 JSON (no behavior change)."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/api/session")
+            assert resp.status_code == 401
+            assert resp.headers.get("content-type", "").startswith("application/json")
+
+    def test_auth_behavior_unchanged_authenticated_api(self, password_file, gateway_key_file, auth_headers):
+        """Authenticated API request still returns 200 JSON (no behavior change)."""
+        with patch.object(app, "PASSWORD_FILE", password_file):
+            client = TestClient(app.app)
+            resp = client.get("/api/session", headers=auth_headers)
+            assert resp.status_code == 200
+            assert resp.headers.get("content-type", "").startswith("application/json")
