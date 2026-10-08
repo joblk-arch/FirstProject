@@ -5048,7 +5048,8 @@ def test_frontend_js_acknowledge_sends_confirm():
 def test_frontend_html_versions_javascript_asset():
     """Deployments must change the script URL so Safari cannot reuse stale UI code."""
     html = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'src="/app.js?v=continuation-jobs-1"' in html
+    assert html.count('src="/app.js?v=reliability-counts-1"') == 1
+    assert 'continuation-jobs-1' not in html
 
 
 def test_frontend_js_alerts_polling():
@@ -5633,8 +5634,10 @@ class TestIndexHtmlVersionedUrl:
 
     def test_versioned_app_js_url(self):
         src = self._read_index()
-        # Must have a version query parameter on app.js
-        assert "app.js?v=" in src or "app.js?version=" in src or "app.js?v=" in src
+        # Must have the exact versioned app.js URL exactly once
+        assert src.count('src="/app.js?v=reliability-counts-1"') == 1
+        # Stale version must be absent
+        assert "continuation-jobs-1" not in src
 
 
 class TestAggregateStatusCounts:
