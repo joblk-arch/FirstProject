@@ -1,4 +1,8 @@
 FROM python:3.13-slim
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN python -m pip install --no-cache-dir fastapi==0.116.1 httpx==0.28.1 pytest==9.1.1
 WORKDIR /workspace
