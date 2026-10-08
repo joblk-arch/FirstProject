@@ -182,11 +182,14 @@ function check(label, fn) {
 
 const countUnavailable = (html) => (html.match(/Unavailable/g) || []).length;
 
+// A valid ISO timestamp used in tests that need a non-Unavailable timestamp.
+const VALID_TS = '2024-06-15T12:00:00Z';
+
 // --- Test 1: agent_queue.status_counts wiring via renderClusterHealth ---
 check('renderClusterHealth wires agent_queue.status_counts into the reliability card', () => {
   renderClusterHealth({
     overall: 'healthy',
-    generated_at: '2024-01-01T00:00:00Z',
+    generated_at: VALID_TS,
     services: [],
     lm_studio: {},
     agent_queue: { running: 1, queued: 2, status_counts: { completed: 10, failed: 3, blocked: 1 } },
@@ -200,7 +203,7 @@ check('renderClusterHealth wires agent_queue.status_counts into the reliability 
 
 // --- Test 2: nonzero and zero counts ---
 check('nonzero counts render as their numeric values', () => {
-  renderStatusCountsCard({ completed: 5, failed: 2, blocked: 7 });
+  renderStatusCountsCard({ completed: 5, failed: 2, blocked: 7 }, VALID_TS);
   const card = $('reliability-card').innerHTML;
   assert(card.includes('<strong>5</strong>'), card);
   assert(card.includes('<strong>2</strong>'), card);
@@ -209,7 +212,7 @@ check('nonzero counts render as their numeric values', () => {
 });
 
 check('zero counts render as 0 (not Unavailable)', () => {
-  renderStatusCountsCard({ completed: 0, failed: 0, blocked: 0 });
+  renderStatusCountsCard({ completed: 0, failed: 0, blocked: 0 }, VALID_TS);
   const card = $('reliability-card').innerHTML;
   assert.strictEqual((card.match(/<strong>0<\/strong>/g) || []).length, 3, card);
   assert(!card.includes('Unavailable'), card);
@@ -217,27 +220,27 @@ check('zero counts render as 0 (not Unavailable)', () => {
 
 // --- Test 3: null / bool / negative / oversized / malicious -> Unavailable, no injected markup ---
 check('null counts show Unavailable', () => {
-  renderStatusCountsCard({ completed: null, failed: null, blocked: null });
+  renderStatusCountsCard({ completed: null, failed: null, blocked: null }, VALID_TS);
   assert.strictEqual(countUnavailable($('reliability-card').innerHTML), 3);
 });
 
 check('boolean counts show Unavailable', () => {
-  renderStatusCountsCard({ completed: true, failed: false, blocked: true });
+  renderStatusCountsCard({ completed: true, failed: false, blocked: true }, VALID_TS);
   assert.strictEqual(countUnavailable($('reliability-card').innerHTML), 3);
 });
 
 check('negative counts show Unavailable', () => {
-  renderStatusCountsCard({ completed: -1, failed: -5, blocked: -100 });
+  renderStatusCountsCard({ completed: -1, failed: -5, blocked: -100 }, VALID_TS);
   assert.strictEqual(countUnavailable($('reliability-card').innerHTML), 3);
 });
 
 check('oversized counts (> 10,000,000) show Unavailable', () => {
-  renderStatusCountsCard({ completed: 10000001, failed: 1e9, blocked: 100000000 });
+  renderStatusCountsCard({ completed: 10000001, failed: 1e9, blocked: 100000000 }, VALID_TS);
   assert.strictEqual(countUnavailable($('reliability-card').innerHTML), 3);
 });
 
 check('count == _SAFE_BOUND (10,000,000) renders as a value, not Unavailable', () => {
-  renderStatusCountsCard({ completed: 10000000, failed: 10000000, blocked: 10000000 });
+  renderStatusCountsCard({ completed: 10000000, failed: 10000000, blocked: 10000000 }, VALID_TS);
   const card = $('reliability-card').innerHTML;
   assert.strictEqual(countUnavailable(card), 0, card);
   assert.strictEqual((card.match(/<strong>10000000<\/strong>/g) || []).length, 3, card);
@@ -248,7 +251,7 @@ check('malicious strings show Unavailable without injected markup', () => {
     completed: '<script>alert("xss")</script>',
     failed: '<img src=x onerror=alert(1)>',
     blocked: '"><svg onload=alert(2)>',
-  });
+  }, VALID_TS);
   const card = $('reliability-card').innerHTML;
   assert.strictEqual(countUnavailable(card), 3, card);
   assert(!card.includes('<script>'), `injected <script> in: ${card}`);
@@ -262,7 +265,7 @@ check('malicious strings show Unavailable without injected markup', () => {
 check('renderClusterHealthError after a successful render resets counts to Unavailable', () => {
   renderClusterHealth({
     overall: 'healthy',
-    generated_at: '2024-01-01T00:00:00Z',
+    generated_at: VALID_TS,
     services: [],
     lm_studio: {},
     agent_queue: { running: 1, queued: 0, status_counts: { completed: 42, failed: 7, blocked: 2 } },
@@ -273,10 +276,64 @@ check('renderClusterHealthError after a successful render resets counts to Unava
 
   renderClusterHealthError();
   card = $('reliability-card').innerHTML;
-  assert.strictEqual(countUnavailable(card), 3, `expected all Unavailable after error: ${card}`);
+  assert.strictEqual(countUnavailable(card), 4, `expected 4 Unavailable (3 counts + 1 timestamp) after error: ${card}`);
   assert(!card.includes('<strong>42</strong>'), `stale count 42 survived error: ${card}`);
   assert(!card.includes('<strong>7</strong>'), `stale count 7 survived error: ${card}`);
   assert(!card.includes('<strong>2</strong>'), `stale count 2 survived error: ${card}`);
+});
+
+// --- Test 5: timestamp display ---
+check('valid generated_at displays a human-readable Last checked time', () => {
+  renderStatusCountsCard({ completed: 1, failed: 0, blocked: 0 }, VALID_TS);
+  const card = $('reliability-card').innerHTML;
+  assert(card.includes('Last checked:'), `missing Last checked label: ${card}`);
+  assert(!card.includes('Last checked: Unavailable'), `should not be Unavailable for valid date: ${card}`);
+  // The timestamp should contain some non-empty content after the label
+  const m = card.match(/Last checked: (.+?)<\/span>/);
+  assert(m, `no timestamp content found: ${card}`);
+  assert(m[1].length > 0, `timestamp content is empty: ${card}`);
+});
+
+check('missing generated_at (null) displays Last checked: Unavailable', () => {
+  renderStatusCountsCard({ completed: 1, failed: 0, blocked: 0 }, null);
+  const card = $('reliability-card').innerHTML;
+  assert(card.includes('Last checked: Unavailable'), `expected Unavailable: ${card}`);
+});
+
+check('missing generated_at (undefined) displays Last checked: Unavailable', () => {
+  renderStatusCountsCard({ completed: 1, failed: 0, blocked: 0 });
+  const card = $('reliability-card').innerHTML;
+  assert(card.includes('Last checked: Unavailable'), `expected Unavailable: ${card}`);
+});
+
+check('invalid generated_at displays Last checked: Unavailable', () => {
+  renderStatusCountsCard({ completed: 1, failed: 0, blocked: 0 }, 'not-a-valid-date');
+  const card = $('reliability-card').innerHTML;
+  assert(card.includes('Last checked: Unavailable'), `expected Unavailable for invalid date: ${card}`);
+});
+
+check('malicious generated_at does not inject raw HTML', () => {
+  renderStatusCountsCard({ completed: 1, failed: 0, blocked: 0 }, '<script>alert("xss")</script>');
+  const card = $('reliability-card').innerHTML;
+  // new Date('<script>...') is invalid, so should show Unavailable
+  assert(card.includes('Last checked: Unavailable'), `expected Unavailable for malicious input: ${card}`);
+  assert(!card.includes('<script>'), `injected script tag: ${card}`);
+});
+
+check('success-to-error resets timestamp to Unavailable', () => {
+  renderClusterHealth({
+    overall: 'healthy',
+    generated_at: VALID_TS,
+    services: [],
+    lm_studio: {},
+    agent_queue: { running: 1, queued: 0, status_counts: { completed: 5, failed: 1, blocked: 0 } },
+  });
+  let card = $('reliability-card').innerHTML;
+  assert(!card.includes('Last checked: Unavailable'), `valid timestamp should not show Unavailable before error: ${card}`);
+
+  renderClusterHealthError();
+  card = $('reliability-card').innerHTML;
+  assert(card.includes('Last checked: Unavailable'), `timestamp should reset to Unavailable after error: ${card}`);
 });
 
 console.log(`\n${passed}/${total} checks passed`);
