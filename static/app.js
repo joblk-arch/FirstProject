@@ -59,6 +59,7 @@ function render(data) {
     const stage = job.workflow_id ? `<button class="workflow-link" type="button" data-workflow-id="${safe(job.workflow_id)}" aria-label="Open ${label} workflow details">${label}</button>` : label;
     return `<tr><td>${stage}</td><td>${safe(job.project)}</td><td><span class="status ${safe(job.status)}">${safe(job.status)}</span></td><td>${modelWithReason(job.model, job.model_reason)}</td><td>${job.total_tokens == null ? '\u2014' : fmt(job.total_tokens)}</td><td>${duration(job.duration_seconds)}</td></tr>`;
   }).join('') : '<tr><td colspan="6" class="empty">No agent jobs yet.</td></tr>';
+  renderRunningNow(jobs);
   const byProject = Object.groupBy ? Object.groupBy(counts,(x) => x.project) : counts.reduce((all,x) => ((all[x.project] ??= []).push(x),all),{});
   $('projects').innerHTML = data.projects.map((project) => { const rows=byProject[project.name]||[]; const total=rows.reduce((n,x)=>n+x.count,0); const running=rows.filter((x)=>['running','queued'].includes(x.status)).reduce((n,x)=>n+x.count,0); const width=Math.min(100,total?Math.max(5,running/total*100):0); return `<div class="item"><div class="item-row"><strong>${safe(project.name)}</strong><span>${total} jobs</span></div><small>${safe(project.default_branch)} \u00b7 ${running} active</small><div class="bar"><i style="width:${width}%"></i></div></div>`; }).join('');
   $('models').innerHTML = usage.length ? usage.map((item) => `<div class="item"><div class="item-row"><strong>${safe((item.model||'Unknown').split('/').pop())}</strong><span>${fmt(item.total_tokens)}</span></div><small>${safe(item.project)} \u00b7 ${item.jobs} jobs \u00b7 ${fmt(item.prompt_tokens)} in / ${fmt(item.completion_tokens)} out</small></div>`).join('') : '<div class="empty">Token accounting begins with the next agent job.</div>';
@@ -504,6 +505,22 @@ function renderClusterHealthError() {
   $('health-timestamp').textContent = '';
   container.innerHTML = `<div class="health-overall status offline"><span>unavailable</span></div><p class="muted-copy">Health check could not be completed.</p>`;
   renderStatusCountsCard(null, null);
+}
+
+function renderRunningNow(jobs) {
+  const container = $('running-now');
+  if (!container) return;
+  const running = (jobs || []).filter((j) => j.status === 'running');
+  if (!running.length) {
+    container.innerHTML = '<p class="muted-copy">No jobs running</p>';
+    return;
+  }
+  container.innerHTML = running.map((job) => {
+    const project = safe(job.project || '\u2014');
+    const stage = safe(job.stage || job.role || '\u2014');
+    const elapsed = job.duration_seconds != null ? `${duration(job.duration_seconds)} reported elapsed time` : 'Timing unavailable';
+    return `<div class="running-item"><strong>${project}</strong><span>${stage}</span><small>${elapsed}</small></div>`;
+  }).join('');
 }
 
 async function load() {

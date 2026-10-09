@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -145,6 +145,7 @@ const context = {
   document: documentStub,
   $: (id) => documentStub.getElementById(id),
   safe,
+  duration: (n) => n == null ? '\u2014' : n < 60 ? `${n}s` : `${Math.floor(n / 60)}m ${n % 60}s`,
   // built-ins the renderers rely on
   Number, String, Array, Date, Intl, Object, Math, JSON, Boolean, RegExp, Error,
   console,
@@ -162,7 +163,7 @@ for (const name of REQUIRED) {
   }
 }
 
-const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError } = context;
+const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow } = context;
 const $ = (id) => documentStub.getElementById(id);
 
 // --- Tiny check runner ---
@@ -334,6 +335,106 @@ check('success-to-error resets timestamp to Unavailable', () => {
   renderClusterHealthError();
   card = $('reliability-card').innerHTML;
   assert(card.includes('Last checked: Unavailable'), `timestamp should reset to Unavailable after error: ${card}`);
+});
+
+// --- renderRunningNow ---
+
+check('renderRunningNow: empty state shows "No jobs running"', () => {
+  renderRunningNow([]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('No jobs running'), `expected "No jobs running", got: ${html}`);
+});
+
+check('renderRunningNow: filters only running jobs', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: 'build', duration_seconds: 30 },
+    { id: '2', status: 'completed', project: 'beta', stage: 'test', duration_seconds: 60 },
+    { id: '3', status: 'queued', project: 'gamma', stage: 'deploy', duration_seconds: null },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('alpha'), `should show running job project: ${html}`);
+  assert(!html.includes('beta'), `should not show completed job: ${html}`);
+  assert(!html.includes('gamma'), `should not show queued job: ${html}`);
+});
+
+check('renderRunningNow: multiple running jobs all shown', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: 'build', duration_seconds: 10 },
+    { id: '2', status: 'running', project: 'beta', stage: 'test', duration_seconds: 120 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('alpha'), `should show first job: ${html}`);
+  assert(html.includes('beta'), `should show second job: ${html}`);
+});
+
+check('renderRunningNow: missing duration_seconds shows "Timing unavailable"', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: 'build', duration_seconds: null },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('Timing unavailable'), `expected "Timing unavailable", got: ${html}`);
+  assert(!html.includes('\u2014'), `should not show em-dash for missing timing: ${html}`);
+});
+
+check('renderRunningNow: stage falls back to role when stage is missing', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: null, role: 'implementer', duration_seconds: 5 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('implementer'), `should show role fallback: ${html}`);
+});
+
+check('renderRunningNow: malicious project/stage strings are escaped', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: '<script>alert(1)</script>', stage: '<img src=x onerror=alert(2)>', duration_seconds: 5 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(!html.includes('<script>'), `raw <script> in output: ${html}`);
+  assert(!html.includes('<img'), `raw <img in output: ${html}`);
+  assert(!html.includes('</script>'), `raw </script> in output: ${html}`);
+});
+
+check('renderRunningNow: shows duration with "reported elapsed time" label', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: 'build', duration_seconds: 90 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('1m 30s'), `should show formatted duration: ${html}`);
+  assert(html.includes('reported elapsed time'), `should label as reported elapsed time: ${html}`);
+});
+
+check('renderRunningNow: duration_seconds undefined shows "Timing unavailable"', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: 'build' },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('Timing unavailable'), `expected "Timing unavailable" for undefined duration, got: ${html}`);
+});
+
+check('renderRunningNow: duration_seconds 0 shows "0s reported elapsed time"', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: 'build', duration_seconds: 0 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('0s'), `should show 0s for zero duration: ${html}`);
+  assert(html.includes('reported elapsed time'), `should label as reported elapsed time: ${html}`);
+  assert(!html.includes('Timing unavailable'), `zero is a valid duration, not unavailable: ${html}`);
+});
+
+check('renderRunningNow: both stage and role missing shows em-dash', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', project: 'alpha', stage: null, role: null, duration_seconds: 5 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('\u2014'), `should show em-dash when both stage and role are null: ${html}`);
+});
+
+check('renderRunningNow: missing project shows em-dash', () => {
+  renderRunningNow([
+    { id: '1', status: 'running', stage: 'build', duration_seconds: 5 },
+  ]);
+  const html = $('running-now').innerHTML;
+  assert(html.includes('\u2014'), `should show em-dash for missing project: ${html}`);
 });
 
 console.log(`\n${passed}/${total} checks passed`);
