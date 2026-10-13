@@ -42,6 +42,7 @@ function repairBadge(state, attempts, max) {
 }
 
 function render(data) {
+  renderRecentWorkflowReliability(data.recent_workflow_reliability);
   const jobs = data.jobs || [], usage = data.usage || [], counts = data.counts || [];
   const active = jobs.filter((j) => ['queued', 'running'].includes(j.status)).length;
   const failed = jobs.filter((j) => ['failed', 'blocked'].includes(j.status)).length;
@@ -630,7 +631,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { renderRecentWorkflowReliability(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
@@ -764,3 +765,63 @@ document.addEventListener('click', (event) => {
 $('refresh').addEventListener('click', () => { load(); loadAlerts(); });
 async function initialize(){try{await loadSession();}catch(error){$('identity').textContent='Access unavailable';}await loadAllowedProjects();if(sessionIdentity.role!=='viewer'){await loadTemplates($('build-project').value);}await load();await loadClusterHealth();await loadAlerts();setInterval(load,15000);setInterval(loadClusterHealth,30000);setInterval(loadAlerts,30000);}
 initialize();
+
+function renderRecentWorkflowReliability(data) {
+  const card = $('recent-workflow-reliability');
+  if (!card) return;
+  const si = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) ? v : null;
+  const sd = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER) ? v : null;
+  const unavail = () => { card.innerHTML = '<h2>Recent workflow reliability</h2><p class="reliability-note">Unavailable</p>'; };
+  if (!data || typeof data !== 'object') { unavail(); return; }
+  const sample = si(data.sample_count);
+  if (sample === null || sample > 20) { unavail(); return; }
+  const s = si(data.successful);
+  const f = si(data.failed);
+  const a = si(data.active);
+  const x = si(data.excluded);
+  if (s === null || f === null || a === null || x === null || s + f + a + x !== sample) {
+    unavail();
+    return;
+  }
+  if (sample === 0) {
+    card.innerHTML = '<h2>Recent workflow reliability</h2><p class="reliability-note">No recent workflows</p>';
+    return;
+  }
+  const denom = s + f;
+  const rate = denom === 0 ? 'Unavailable' : (s / denom * 100).toFixed(1) + '%';
+  const KNOWN_STAGES = ['plan', 'implement', 'test', 'review', 'reason', 'unknown'];
+  const stageHtml = (counts, label) => {
+    if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return `<p>${label}: Unavailable</p>`;
+    const entries = KNOWN_STAGES.filter((k) => Object.prototype.hasOwnProperty.call(counts, k));
+    if (entries.some((k) => si(counts[k]) === null)) return `<p>${label}: Unavailable</p>`;
+    if (!entries.length) return `<p>${label}: None</p>`;
+    return `<p>${label}: ${entries.map((k) => `${safe(k)}: ${counts[k]}`).join(' · ')}</p>`;
+  };
+  const dur = data.duration;
+  const med = sd(dur && dur.median_seconds);
+  const samples = si(dur && dur.sample_count);
+  const durStr = med !== null && samples !== null && samples > 0 && samples <= s + f
+    ? `${med.toFixed(1)}s (${samples} samples)` : 'Not recorded';
+  const tok = (data.tokens && typeof data.tokens === 'object') ? data.tokens : null;
+  let tokStr;
+  if (!tok) {
+    tokStr = 'Not recorded';
+  } else {
+    const tm = si(tok.measured_jobs);
+    const tmi = si(tok.missing_jobs);
+    const total = si(tok.total);
+    if (tm === null || tmi === null) {
+      tokStr = 'Not recorded';
+    } else {
+      tokStr = `${tm > 0 && total !== null ? String(total) : 'Not recorded'} (${tm} measured / ${tmi} missing jobs)` + (tmi > 0 ? ' — Incomplete' : '');
+    }
+  }
+  const metrics = [['Approved / merged / pushed', s], ['Failed outcomes', f], ['Active', a], ['Excluded', x]]
+    .map(([l, v]) => `<article class="metric"><span>${l}</span><strong>${v}</strong></article>`)
+    .join('');
+  card.innerHTML = `<h2>Recent workflow reliability</h2>` +
+    `<p class="reliability-note">Latest ${sample} workflows (up to 20) · Success rate: ${rate} (${denom} assessed outcomes) · Median completion: ${durStr} · Recorded tokens: ${tokStr}</p>` +
+    `<div class="reliability-grid">${metrics}</div>` +
+    stageHtml(data.failure_stage_counts, 'Failed stages') + stageHtml(data.blocked_stage_counts, 'Blocked stages') +
+    '<p class="reliability-note">Active and excluded workflows are not in the success-rate denominator. Historical canaries are included.</p>';
+}

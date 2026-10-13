@@ -23,6 +23,7 @@ from starlette.responses import Response, JSONResponse, HTMLResponse
 import asyncio
 import tempfile
 import time
+import math
 import urllib.parse
 
 
@@ -1102,6 +1103,10 @@ def _project_dashboard(raw: dict) -> dict:
             projected_workflows.append(entry)
         result["recent_workflows"] = projected_workflows
 
+    result["recent_workflow_reliability"] = _safe_recent_workflow_reliability(
+        raw.get("recent_workflow_reliability")
+    )
+
     return result
 
 
@@ -1134,6 +1139,158 @@ def _safe_nonneg_int(value) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
     return None
+
+
+_JS_SAFE_INT_MAX = 2**53 - 1
+_KNOWN_STAGES = frozenset({"plan", "implement", "test", "review", "reason", "unknown"})
+
+
+def _is_safe_int(value) -> bool:
+    """True if value is a valid non-negative int (not bool, within JS safe range)."""
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, int):
+        return False
+    if value < 0 or value > _JS_SAFE_INT_MAX:
+        return False
+    return True
+
+
+def _safe_stage_counts(raw) -> dict | None:
+    """Validate stage counts: only known keys, bounded non-negative ints."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        return None
+    result = {}
+    for key, val in raw.items():
+        if key not in _KNOWN_STAGES:
+            continue
+        if not _is_safe_int(val) or val > 20:
+            return None
+        result[key] = val
+    return result
+
+
+def _safe_duration(raw) -> dict | None:
+    """Validate duration dict: sample_count <= 20, seconds finite >= 0 or null."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    sc = raw.get("sample_count")
+    if sc is not None:
+        if not _is_safe_int(sc) or sc > 20:
+            return None
+
+    def _safe_seconds(v):
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return None
+        if not isinstance(v, (int, float)):
+            return None
+        if isinstance(v, int):
+            if v < 0 or v > _JS_SAFE_INT_MAX:
+                return None
+        else:
+            if not math.isfinite(v):
+                return None
+        if v < 0:
+            return None
+        return v
+
+    return {
+        "sample_count": sc,
+        "median_seconds": _safe_seconds(raw.get("median_seconds")),
+        "average_seconds": _safe_seconds(raw.get("average_seconds")),
+    }
+
+
+def _safe_tokens(raw) -> dict | None:
+    """Validate tokens dict with strict rules."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    measured = raw.get("measured_jobs")
+    missing = raw.get("missing_jobs")
+
+    if not _is_safe_int(measured) or not _is_safe_int(missing):
+        return None
+
+    incomplete = missing > 0
+
+    total = raw.get("total")
+    if measured == 0:
+        total = None
+    else:
+        if total is not None and not _is_safe_int(total):
+            return None
+
+    return {
+        "total": total,
+        "measured_jobs": measured,
+        "missing_jobs": missing,
+        "incomplete": incomplete,
+    }
+
+
+def _safe_recent_workflow_reliability(raw) -> dict | None:
+    """Project the gateway recent_workflow_reliability field with strict allowlist.
+
+    Returns None for missing/malformed input (card will show Unavailable).
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    sample_count = raw.get("sample_count")
+    if not _is_safe_int(sample_count) or sample_count > 20:
+        return None
+
+    successful = raw.get("successful")
+    failed = raw.get("failed")
+    active = raw.get("active")
+    excluded = raw.get("excluded")
+
+    for v in (successful, failed, active, excluded):
+        if not _is_safe_int(v):
+            return None
+
+    if successful + failed + active + excluded != sample_count:
+        return None
+
+    denominator = successful + failed
+    if denominator == 0:
+        rate = None
+    else:
+        rate = successful / denominator
+
+    failure_stage_counts = _safe_stage_counts(raw.get("failure_stage_counts"))
+    if failure_stage_counts is None:
+        return None
+
+    blocked_stage_counts = _safe_stage_counts(raw.get("blocked_stage_counts"))
+    if blocked_stage_counts is None:
+        return None
+
+    duration = _safe_duration(raw.get("duration"))
+    tokens = _safe_tokens(raw.get("tokens"))
+
+    return {
+        "sample_count": sample_count,
+        "successful": successful,
+        "failed": failed,
+        "active": active,
+        "excluded": excluded,
+        "rate": rate,
+        "failure_stage_counts": failure_stage_counts,
+        "blocked_stage_counts": blocked_stage_counts,
+        "duration": duration,
+        "tokens": tokens,
+    }
 
 
 def _derive_repair_state(

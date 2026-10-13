@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -803,6 +803,98 @@ check('UPS: explicit stale true from valid source => stale badge', () => {
   const html = $('ups-status').innerHTML;
   assert(html.includes('stale'), `should show stale for explicit stale: ${html}`);
   assert(!html.includes('healthy'), `must not be healthy: ${html}`);
+});
+
+const recentFixture = () => ({
+  sample_count: 4, successful: 2, failed: 1, active: 1, excluded: 0,
+  rate: 1, failure_stage_counts: {plan: 1}, blocked_stage_counts: {review: 1},
+  duration: {sample_count: 3, median_seconds: 60, average_seconds: 70},
+  tokens: {total: 100, measured_jobs: 2, missing_jobs: 1, incomplete: true},
+});
+const recentHtml = (data) => {
+  context.renderRecentWorkflowReliability(data);
+  return $('recent-workflow-reliability').innerHTML;
+};
+check('Recent reliability: exact schema and derived denominator', () => {
+  const html = recentHtml(recentFixture());
+  for (const expected of ['Latest 4 workflows (up to 20)', '66.7%', '3 assessed outcomes',
+    '60.0s (3 samples)', 'Recorded tokens: 100', '2 measured / 1 missing jobs', 'Incomplete',
+    'Failed stages: plan: 1', 'Blocked stages: review: 1', 'Approved / merged / pushed']) {
+    assert(html.includes(expected), `${expected} absent: ${html}`);
+  }
+});
+check('Recent reliability: recorded zero stays zero', () => {
+  const data = recentFixture();
+  data.tokens = {total: 0, measured_jobs: 2, missing_jobs: 0, incomplete: false};
+  const html = recentHtml(data);
+  assert(html.includes('Recorded tokens: 0 (2 measured / 0 missing jobs)'), html);
+  assert(!html.includes('Incomplete'), html);
+});
+check('Recent reliability: unknown tokens and duration not invented', () => {
+  const data = recentFixture();
+  data.tokens = {total: null, measured_jobs: 0, missing_jobs: 3};
+  data.duration = {sample_count: 0, median_seconds: null};
+  const html = recentHtml(data);
+  assert(html.includes('Median completion: Not recorded'), html);
+  assert(html.includes('Recorded tokens: Not recorded (0 measured / 3 missing jobs)'), html);
+});
+check('Recent reliability: active-only never claims 100 percent', () => {
+  const data = recentFixture();
+  Object.assign(data, {successful: 0, failed: 0, active: 4});
+  const html = recentHtml(data);
+  assert(html.includes('Success rate: Unavailable (0 assessed outcomes)'), html);
+  assert(!html.includes('100.0%'), html);
+});
+check('Recent reliability: valid empty window and invalid counts', () => {
+  assert(recentHtml({sample_count: 0, successful: 0, failed: 0, active: 0, excluded: 0}).includes('No recent workflows'));
+  for (const sample of [true, 1.5, 21, NaN, -1]) {
+    assert(recentHtml({...recentFixture(), sample_count: sample}).includes('Unavailable'));
+  }
+  assert(recentHtml({...recentFixture(), successful: true}).includes('Unavailable'));
+  assert(recentHtml({...recentFixture(), failed: 4}).includes('Unavailable'));
+});
+check('Recent reliability: missing data resets earlier numbers', () => {
+  recentHtml(recentFixture());
+  const html = recentHtml(null);
+  assert(html.includes('Unavailable') && !html.includes('66.7%'), html);
+});
+check('Recent reliability: malicious fields and stage keys never rendered', () => {
+  const data = recentFixture();
+  data.failure_stage_counts['<img src=x onerror=alert(1)>'] = 1;
+  data.workflows = [{id: '<script>bad</script>', status: 'healthy'}];
+  const html = recentHtml(data);
+  assert(!html.includes('<img') && !html.includes('<script>') && !html.includes('onerror'), html);
+  assert(html.includes('Failed stages: plan: 1'), html);
+});
+
+// --- Wiring: render calls renderRecentWorkflowReliability ---
+check('render calls renderRecentWorkflowReliability(data.recent_workflow_reliability)', () => {
+  const renderSrc = extractFunction(source, 'render');
+  assert(renderSrc !== null, 'render function must exist');
+  assert(renderSrc.includes('renderRecentWorkflowReliability(data.recent_workflow_reliability)'),
+    'render must call renderRecentWorkflowReliability(data.recent_workflow_reliability)');
+});
+
+// --- Wiring: load catch calls renderRecentWorkflowReliability(null) before Session expired return ---
+check('load catch calls renderRecentWorkflowReliability(null) before Session expired return', () => {
+  const loadSrc = extractFunction(source, 'load');
+  assert(loadSrc !== null, 'load function must exist');
+  const catchIdx = loadSrc.indexOf('catch');
+  assert(catchIdx !== -1, 'load must have a catch block');
+  const catchSrc = loadSrc.slice(catchIdx);
+  const nullCallIdx = catchSrc.indexOf('renderRecentWorkflowReliability(null)');
+  assert(nullCallIdx !== -1, 'load catch must call renderRecentWorkflowReliability(null)');
+  const sessionIdx = catchSrc.indexOf("Session expired");
+  assert(sessionIdx !== -1, 'load catch must reference Session expired');
+  assert(nullCallIdx < sessionIdx, 'renderRecentWorkflowReliability(null) must appear before Session expired return in catch');
+});
+
+// --- No new setInterval introduced by wiring ---
+check('no new setInterval in render or load wiring', () => {
+  const renderSrc = extractFunction(source, 'render');
+  const loadSrc = extractFunction(source, 'load');
+  assert(!renderSrc.includes('setInterval'), 'render must not contain setInterval');
+  assert(!loadSrc.includes('setInterval'), 'load must not contain setInterval');
 });
 
 console.log(`\n${passed}/${total} checks passed`);
