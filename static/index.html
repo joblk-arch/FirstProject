@@ -89,6 +89,13 @@
         </div>
         <div id="cluster-health" class="health-grid" role="status" aria-live="polite"></div>
       </section>
+      <section class="panel span-2" id="ups-panel" aria-labelledby="ups-title">
+        <div class="panel-head">
+          <div><p class="eyebrow">UPS STATUS</p><h2 id="ups-title">Uninterruptible power</h2></div>
+          <span class="hint" id="ups-timestamp"></span>
+        </div>
+        <div id="ups-status" class="ups-grid" role="status" aria-live="polite"></div>
+      </section>
       <section class="panel span-2" id="alerts-panel" aria-labelledby="alerts-title">
         <div class="panel-head"><div><p class="eyebrow">ALERTS</p><h2 id="alerts-title">Active alerts</h2></div><span class="hint" id="alerts-hint"></span></div>
         <div id="alerts" class="alerts-list" role="status" aria-live="polite"></div>

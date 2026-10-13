@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -163,7 +163,7 @@ for (const name of REQUIRED) {
   }
 }
 
-const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow } = context;
+const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow, renderUpsStatus } = context;
 const $ = (id) => documentStub.getElementById(id);
 
 // --- Tiny check runner ---
@@ -435,6 +435,374 @@ check('renderRunningNow: missing project shows em-dash', () => {
   ]);
   const html = $('running-now').innerHTML;
   assert(html.includes('\u2014'), `should show em-dash for missing project: ${html}`);
+});
+
+// ─── UPS Status Renderer Tests ───────────────────────────────────────────────
+
+check('UPS: fresh AC power shows healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('healthy'), `should show healthy: ${html}`);
+  assert(html.includes('AC Power'), `should show AC Power: ${html}`);
+  assert(html.includes('100%'), `should show 100%: ${html}`);
+  assert(html.includes('Yes'), `should show UPS present Yes: ${html}`);
+  assert(html.includes('running'), `should show running: ${html}`);
+});
+
+check('UPS: battery 0 displays 0 not dash', () => {
+  const data = {
+    power_source: 'ups', battery_percent: 0, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('0%'), `should show 0% not dash: ${html}`);
+  assert(!html.includes('\u2014</span>'), `should not show dash for battery: ${html}`);
+});
+
+check('UPS: stale data shows Stale not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 80, ups_present: true,
+    monitor_state: 'running', source_fresh: false, stale: true,
+    source_health: 'stale', last_updated: '2024-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('Stale'), `should show Stale: ${html}`);
+  assert(!html.includes('healthy'), `should not show healthy: ${html}`);
+});
+
+check('UPS: missing/null data shows Unavailable', () => {
+  renderUpsStatus(null);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('Unavailable'), `should show Unavailable: ${html}`);
+  assert(!html.includes('healthy'), `should not show healthy: ${html}`);
+});
+
+check('UPS: fresh data + stopped monitor shows degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'stopped', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('ups-badge degraded'), `badge should be degraded: ${html}`);
+  assert(html.includes('stopped'), `should show stopped: ${html}`);
+  assert(!html.includes('ups-badge healthy'), `badge should not be healthy: ${html}`);
+});
+
+check('UPS: fresh absent UPS shows degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: null, ups_present: false,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('ups-badge degraded'), `badge should be degraded: ${html}`);
+  assert(html.includes('No UPS detected'), `should show No UPS detected: ${html}`);
+  assert(!html.includes('ups-badge healthy'), `badge should not be healthy: ${html}`);
+});
+
+check('UPS: fetch failure (null) resets to Unavailable', () => {
+  // Simulate previously healthy then fetch failure
+  const goodData = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(goodData);
+  assert($('ups-status').innerHTML.includes('healthy'), 'should be healthy first');
+  // Now fetch fails
+  renderUpsStatus(null);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('Unavailable'), `should reset to Unavailable: ${html}`);
+  assert(!html.includes('healthy'), `should not keep old green: ${html}`);
+});
+
+check('UPS: malicious HTML in last_event is escaped', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z',
+    last_event: '<script>alert("xss")</script><img onerror=alert(1) src=x>'
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(!html.includes('<script>'), `should not contain raw script tag: ${html}`);
+  assert(!html.includes('<img'), `should not contain raw img tag: ${html}`);
+  assert(html.includes('&lt;script&gt;'), `should contain escaped script: ${html}`);
+});
+
+check('UPS: malicious HTML in power_source is escaped', () => {
+  const data = {
+    power_source: '<b onmouseover=alert(1)>bold</b>', battery_percent: 50,
+    ups_present: true, monitor_state: 'running', source_fresh: true,
+    stale: false, source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  // Invalid power_source should fall back to 'unknown'
+  assert(html.includes('Unknown'), `should show Unknown for invalid power_source: ${html}`);
+  assert(!html.includes('<b '), `should not contain raw b tag: ${html}`);
+});
+
+check('UPS: fixed policy text is exact and cannot be changed by API', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z',
+    last_event: '', policy: 'SHUTDOWN AT 0% IMMEDIATELY'
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('Shutdown below 40% on UPS power only'), `should show exact policy: ${html}`);
+  assert(!html.includes('SHUTDOWN AT 0%'), `should not show API policy override: ${html}`);
+  assert(!html.includes('<=40'), `should not contain <=40 wording: ${html}`);
+  assert(!html.includes('timer'), `should not contain timer wording: ${html}`);
+});
+
+check('UPS: invalid battery values fall back safely', () => {
+  // Negative
+  renderUpsStatus({ power_source: 'ac', battery_percent: -5, ups_present: true, monitor_state: 'running', source_fresh: true, stale: false, source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: '' });
+  assert($('ups-status').innerHTML.includes('\u2014'), `negative battery should show dash`);
+  // Over 100
+  renderUpsStatus({ power_source: 'ac', battery_percent: 150, ups_present: true, monitor_state: 'running', source_fresh: true, stale: false, source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: '' });
+  assert($('ups-status').innerHTML.includes('\u2014'), `over-100 battery should show dash`);
+  // String instead of number
+  renderUpsStatus({ power_source: 'ac', battery_percent: '50', ups_present: true, monitor_state: 'running', source_fresh: true, stale: false, source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: '' });
+  assert($('ups-status').innerHTML.includes('\u2014'), `string battery should show dash`);
+  // Boolean (not a valid number type in JS for our check)
+  renderUpsStatus({ power_source: 'ac', battery_percent: true, ups_present: true, monitor_state: 'running', source_fresh: true, stale: false, source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: '' });
+  assert($('ups-status').innerHTML.includes('\u2014'), `boolean battery should show dash`);
+});
+
+check('UPS: invalid date shows dash', () => {
+  renderUpsStatus({ power_source: 'ac', battery_percent: 50, ups_present: true, monitor_state: 'running', source_fresh: true, stale: false, source_health: 'fresh', last_updated: 'not-a-date', last_event: '' });
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('\u2014'), `invalid date should show dash: ${html}`);
+});
+
+check('UPS: no shutdown button or mutation controls', () => {
+  const data = {
+    power_source: 'ups', battery_percent: 30, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(!html.includes('<button'), `should not contain button: ${html}`);
+  assert(!html.includes('<input'), `should not contain input: ${html}`);
+  assert(!html.includes('<form'), `should not contain form: ${html}`);
+  assert(!html.includes('onclick'), `should not contain onclick: ${html}`);
+});
+
+check('UPS: read-only controls (no interactive elements)', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(!html.includes('<a '), `should not contain links: ${html}`);
+  assert(!html.includes('<select'), `should not contain select: ${html}`);
+  assert(!html.includes('<textarea'), `should not contain textarea: ${html}`);
+});
+
+check('UPS: timestamp hint updates', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  assert($('ups-timestamp').textContent.includes('Updated'), `timestamp should show Updated: ${$('ups-timestamp').textContent}`);
+  // Null data
+  renderUpsStatus(null);
+  assert($('ups-timestamp').textContent === 'No data', `timestamp should show No data: ${$('ups-timestamp').textContent}`);
+});
+
+check('UPS: last_event bounded to 500 chars', () => {
+  const longEvent = 'Z'.repeat(1000);
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: longEvent
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  // Count Z's - only appears in last_event (no other field uses Z)
+  const zCount = (html.match(/Z/g) || []).length;
+  assert(zCount <= 500, `last_event should be bounded to 500 chars, got ${zCount} Z's`);
+  assert(zCount === 500, `last_event should be exactly 500 chars, got ${zCount}`);
+});
+
+// --- Targeted UPS badge correction tests ---
+
+check('UPS: fresh AC + unknown monitor => degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'unknown', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for unknown monitor: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy with unknown monitor: ${html}`);
+});
+
+check('UPS: fresh AC + missing presence => degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for missing presence: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy with missing presence: ${html}`);
+});
+
+check('UPS: fresh AC + invalid battery (boolean) => degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: true, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for boolean battery: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy with boolean battery: ${html}`);
+});
+
+check('UPS: fresh AC + invalid battery (fraction) => degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50.5, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for fraction battery: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy with fraction battery: ${html}`);
+});
+
+check('UPS: missing source_health + stale true => unavailable', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: false, stale: true,
+    last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('unavailable'), `should show unavailable for missing source_health: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy: ${html}`);
+  assert(!html.includes('stale'), `must not show stale when source_health missing: ${html}`);
+});
+
+check('UPS: malformed source_health (number) + stale true => unavailable', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: false, stale: true,
+    source_health: 42, last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('unavailable'), `should show unavailable for malformed source_health: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy: ${html}`);
+});
+
+check('UPS: contradictory source_fresh true + stale true => degraded not healthy', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: true,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for contradictory flags: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy with contradictory flags: ${html}`);
+});
+
+check('UPS: fresh valid 0% battery on AC => healthy shows 0%', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 0, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('healthy'), `should show healthy for valid 0%: ${html}`);
+  assert(html.includes('0%'), `should show 0%: ${html}`);
+});
+
+check('UPS: fresh valid 0% battery on UPS => warning shows 0%', () => {
+  const data = {
+    power_source: 'ups', battery_percent: 0, ups_present: true,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('warning'), `should show warning for 0% on UPS: ${html}`);
+  assert(html.includes('0%'), `should show 0%: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy on UPS power: ${html}`);
+});
+
+check('UPS: stopped monitor + fresh source => degraded visible', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 80, ups_present: true,
+    monitor_state: 'stopped', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for stopped: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy when stopped: ${html}`);
+});
+
+check('UPS: absent UPS + fresh source => degraded visible', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 100, ups_present: false,
+    monitor_state: 'running', source_fresh: true, stale: false,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('degraded'), `should show degraded for absent: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy when absent: ${html}`);
+});
+
+check('UPS: actual source_health stale => stale badge', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: false, stale: false,
+    source_health: 'stale', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('stale'), `should show stale badge: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy: ${html}`);
+});
+
+check('UPS: explicit stale true from valid source => stale badge', () => {
+  const data = {
+    power_source: 'ac', battery_percent: 50, ups_present: true,
+    monitor_state: 'running', source_fresh: false, stale: true,
+    source_health: 'fresh', last_updated: '2025-01-01T00:00:00Z', last_event: ''
+  };
+  renderUpsStatus(data);
+  const html = $('ups-status').innerHTML;
+  assert(html.includes('stale'), `should show stale for explicit stale: ${html}`);
+  assert(!html.includes('healthy'), `must not be healthy: ${html}`);
 });
 
 console.log(`\n${passed}/${total} checks passed`);

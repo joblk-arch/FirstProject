@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -37,6 +38,254 @@ PASSWORD_FILE = Path(os.getenv("DASHBOARD_PASSWORD_FILE", "/run/secrets/dashboar
 USERS_FILE = Path(os.getenv("DASHBOARD_USERS_FILE", "/run/secrets/dashboard_users"))
 AUDIT_LOG_FILE = Path(os.getenv("DASHBOARD_AUDIT_LOG_FILE", "/tmp/local-ai-dashboard-audit.jsonl"))
 TEMPLATES_FILE = Path(os.getenv("DASHBOARD_TEMPLATES_FILE", "/data/templates.json"))
+# --- UPS status (read-only collector file) ---
+# The Docker app cannot call host pmset/launchctl (no Docker socket, no
+# privileged mount, no SSH/browser credentials, no subprocess execution).
+# A separate host collector (Phase 2) writes UPS_STATUS_FILE; this app only
+# reads it. The app NEVER writes the status file and never exposes raw host
+# paths, secrets, or raw errors. Missing/malformed/stale/future data is
+# reported as unknown/stale, never as a guessed "healthy".
+UPS_STATUS_FILE = Path(os.getenv("DASHBOARD_UPS_STATUS_FILE", "/data/ups-status.json"))
+UPS_STATUS_MAX_BYTES = 16 * 1024  # fixed 16 KiB cap; no env override
+UPS_STATUS_FRESHNESS_SECONDS = 30  # fixed 30 s; no env override
+UPS_THRESHOLD_PERCENT = 40  # fixed 40 %; no env override (actual monitor policy)
+UPS_LAST_EVENT_MAX = 500  # bounded plain-string length for last_event
+
+
+def _parse_iso_utc(value):
+    """Parse an ISO-8601 timestamp string to an aware UTC datetime, or None.
+
+    - Naive timestamps (no tzinfo) are rejected.
+    - Invalid strings, overflow, or non-string types return None.
+    - Aware timestamps with any UTC offset are normalized to UTC.
+    - 'Z' suffix is accepted (converted to +00:00).
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (ValueError, OverflowError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        # Naive timestamp: reject (cannot assume UTC)
+        return None
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
+def _validate_ups_core_fields(data):
+    """Validate required core UPS fields. Returns (valid: bool, errors: list).
+
+    Required fields and their types:
+    - power_source: str, must be "ac" or "ups"
+    - battery_percent: int (not bool), 0..100
+    - ups_present: bool (reject int subclass)
+    - monitor_state: str, must be "running" or "stopped"
+
+    Unknown/missing core fields => source is invalid.
+    """
+    errors = []
+
+    # power_source: must be str "ac" or "ups"
+    ps = data.get("power_source")
+    if not isinstance(ps, str) or ps not in ("ac", "ups"):
+        errors.append("power_source")
+
+    # battery_percent: must be int (not bool), 0..100
+    bp = data.get("battery_percent")
+    if isinstance(bp, bool) or not isinstance(bp, int):
+        errors.append("battery_percent")
+    elif bp < 0 or bp > 100:
+        errors.append("battery_percent")
+
+    # ups_present: must be actual bool (reject int subclass)
+    up = data.get("ups_present")
+    if not isinstance(up, bool):
+        errors.append("ups_present")
+
+    # monitor_state: must be str "running" or "stopped"
+    ms = data.get("monitor_state")
+    if not isinstance(ms, str) or ms not in ("running", "stopped"):
+        errors.append("monitor_state")
+
+    return (len(errors) == 0, errors)
+
+
+def _ups_policy():
+    """Fixed, safe UPS policy: battery-only, strictly-below threshold, no duration."""
+    return {
+        "threshold_percent": UPS_THRESHOLD_PERCENT,
+        "comparison": "strictly_below",
+        "battery_only": True,
+    }
+
+
+def _read_ups_file(path):
+    """Bounded, safe read of a status file. Returns decoded text or None.
+
+    Uses os.open with O_NOFOLLOW (where available) and O_NONBLOCK to avoid
+    symlink/fifo hangs. fstat requires a regular file. Reads at most
+    UPS_STATUS_MAX_BYTES + 1 bytes; rejects if oversize. Decodes UTF-8 strict.
+    Always closes the fd exactly once, even on error. Never raises.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    fd = None
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return None
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if st.st_size > UPS_STATUS_MAX_BYTES:
+            return None
+        data = os.read(fd, UPS_STATUS_MAX_BYTES + 1)
+        if len(data) > UPS_STATUS_MAX_BYTES:
+            return None
+        return data.decode("utf-8")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _read_ups_status(now):
+    """Read and normalize the UPS status file into a safe structured status.
+
+    Returns a dict with keys:
+    - power_source: "ac" | "ups" | "unknown"
+    - battery_percent: int 0..100 or None
+    - ups_present: bool or None
+    - monitor_state: "running" | "stopped" | "unknown"
+    - observed_at: ISO string or None
+    - policy: dict (fixed threshold policy)
+    - last_event: str (bounded 500 chars, plain text) or None
+    - source_health: "fresh" | "stale" | "missing" | "malformed" | "invalid"
+    - source_fresh: bool (timestamp freshness only, separate from monitor health)
+    - stale: bool (True if not fresh)
+    - last_updated: ISO string or None
+
+    Policy:
+    - A timestamp alone + incomplete core fields CANNOT mark source fresh.
+    - Future timestamps => stale.
+    - >30s old => stale. Exact 30s boundary => stale.
+    - ups_present=False with valid clear data => fresh UPS absent (not healthy).
+    - Do NOT guess "running" from timestamp.
+    - monitor_state="stopped" => source_fresh is separate from monitor health.
+    - Raw extra fields are ignored.
+    - No raw paths, errors, or secret leaks in output.
+    """
+    result = {
+        "power_source": "unknown",
+        "battery_percent": None,
+        "ups_present": None,
+        "monitor_state": "unknown",
+        "observed_at": None,
+        "policy": _ups_policy(),
+        "last_event": None,
+        "source_health": "unknown",
+        "source_fresh": False,
+        "stale": True,
+        "last_updated": None,
+    }
+
+    # Check file existence
+    if not UPS_STATUS_FILE.exists():
+        result["source_health"] = "missing"
+        return result
+
+    # Read file safely
+    raw_text = _read_ups_file(UPS_STATUS_FILE)
+    if raw_text is None:
+        result["source_health"] = "invalid"
+        return result
+
+    # Parse JSON
+    try:
+        data = json.loads(raw_text)
+    except (json.JSONDecodeError, ValueError):
+        result["source_health"] = "malformed"
+        return result
+
+    if not isinstance(data, dict):
+        result["source_health"] = "malformed"
+        return result
+
+    # Validate core fields
+    core_valid, _core_errors = _validate_ups_core_fields(data)
+
+    # Parse timestamp
+    observed_raw = data.get("observed_at")
+    observed_dt = _parse_iso_utc(observed_raw) if observed_raw is not None else None
+
+    # Determine freshness
+    fresh = False
+    if observed_dt is not None:
+        delta = (now - observed_dt).total_seconds()
+        # Future timestamp => stale
+        if delta < 0:
+            fresh = False
+        # >30s or exactly 30s => stale
+        elif delta > UPS_STATUS_FRESHNESS_SECONDS:
+            fresh = False
+        elif delta == UPS_STATUS_FRESHNESS_SECONDS:
+            fresh = False
+        else:
+            fresh = True
+
+    # Source health determination:
+    # - Core fields invalid/missing => "invalid" (stronger than "stale")
+    # - Core fields valid but timestamp stale/missing/future => "stale"
+    # - Core fields valid and timestamp fresh => "fresh"
+    if not core_valid:
+        result["source_health"] = "invalid"
+        result["source_fresh"] = False
+        result["stale"] = True
+    elif fresh:
+        result["source_health"] = "fresh"
+        result["source_fresh"] = True
+        result["stale"] = False
+    else:
+        result["source_health"] = "stale"
+        result["source_fresh"] = False
+        result["stale"] = True
+
+    # Populate fields only when core is valid
+    if core_valid:
+        result["power_source"] = data["power_source"]
+        result["battery_percent"] = data["battery_percent"]
+        result["ups_present"] = data["ups_present"]
+        result["monitor_state"] = data["monitor_state"]
+        if observed_raw is not None and isinstance(observed_raw, str):
+            result["observed_at"] = observed_raw
+            result["last_updated"] = observed_raw
+
+    # last_event: bounded 500 plain string, never HTML
+    le = data.get("last_event")
+    if isinstance(le, str):
+        result["last_event"] = le[:UPS_LAST_EVENT_MAX]
+    # Non-string last_event is ignored (stays None)
+
+    return result
 USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 ALLOWED_PROJECTS = [p.strip() for p in os.getenv("AGENT_GATEWAY_ALLOWED_PROJECTS", "").split(",") if p.strip()]
 WORKFLOW_ACTIONS = {"retry", "rereview", "approve", "merge", "push", "cleanup"}
@@ -1847,6 +2096,31 @@ def _project_alerts(gateway_data: dict) -> dict:
         "active": active,
         "history": history[:MAX_ALERT_HISTORY],
     }
+
+
+# --- UPS status (read-only) ---
+# The Docker app cannot call host pmset/launchctl (no Docker socket, no
+# privileged mount, no SSH/browser credentials, no subprocess execution).
+# A separate host collector (Phase 2) writes UPS_STATUS_FILE; this app only
+# reads it. The app NEVER writes the status file and never exposes raw host
+# paths, secrets, or raw errors. Missing/malformed/stale/future data is
+# reported as unknown/stale, never as a guessed "healthy".
+
+
+@app.get("/api/ups-status")
+async def get_ups_status(request: Request):
+    """Return the normalized UPS status read from the collector file.
+
+    Available to all authenticated roles (viewer/operator/admin). Read-only:
+    never writes the status file, never exposes raw host paths, secrets, or
+    raw errors. Missing/malformed/stale/future data => unknown/stale, never
+    a guessed "healthy".
+    """
+    role = getattr(request.state, "role", None)
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    now = datetime.now(timezone.utc)
+    return JSONResponse(_read_ups_status(now))
 
 
 @app.get("/api/alerts")

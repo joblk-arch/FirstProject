@@ -88,6 +88,99 @@ function render(data) {
   $('error').hidden = true;
 }
 
+function renderUpsStatus(data) {
+  const grid = $('ups-status');
+  const ts = $('ups-timestamp');
+  if (!grid) return;
+  const POLICY_TEXT = 'Shutdown below 40% on UPS power only';
+  function fmtTime(v) {
+    if (!v) return '\u2014';
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? '\u2014' : d.toLocaleString();
+  }
+  function healthClass(h, overall) {
+    if (overall !== 'healthy') return 'unavailable';
+    if (h === 'fresh') return 'healthy';
+    if (h === 'stale') return 'stale';
+    return 'unavailable';
+  }
+  function healthLabel(h, overall) {
+    if (overall !== 'healthy') return 'Unavailable';
+    if (h === 'fresh') return 'Available';
+    if (h === 'stale') return 'Stale';
+    return 'Unavailable';
+  }
+  // Determine overall status
+  let status = 'unavailable';
+  let statusLabel = 'Unavailable';
+  if (data) {
+    const validSH = ['fresh', 'stale', 'degraded', 'unavailable'];
+    const sh = data.source_health;
+    if (typeof sh !== 'string' || !validSH.includes(sh)) {
+      status = 'unavailable'; statusLabel = 'Unavailable';
+    } else {
+      const monitorRunning = data.monitor_state === 'running';
+      const present = data.ups_present === true;
+      const ps = data.power_source;
+      const powerValid = (ps === 'ac' || ps === 'ups');
+      const bp = data.battery_percent;
+      const validBattery = Number.isInteger(bp) && bp >= 0 && bp <= 100;
+      const sf = data.source_fresh;
+      const st = data.stale;
+      const contradictory = (sf === true && (st === true || sh !== 'fresh'));
+      if (contradictory) {
+        status = 'degraded'; statusLabel = 'Degraded (contradictory flags)';
+      } else if (sh === 'stale') {
+        status = 'stale'; statusLabel = 'Stale';
+      } else if (st === true && monitorRunning && present && powerValid && validBattery) {
+        status = 'stale'; statusLabel = 'Stale';
+      } else if (sh === 'fresh' && sf === true && st !== true) {
+        if (!monitorRunning) { status = 'degraded'; statusLabel = 'Degraded (monitor stopped)'; }
+        else if (!present) { status = 'degraded'; statusLabel = 'No UPS detected'; }
+        else if (!validBattery) { status = 'degraded'; statusLabel = 'Degraded (invalid battery)'; }
+        else if (!powerValid) { status = 'degraded'; statusLabel = 'Unknown power source'; }
+        else if (ps === 'ac') { status = 'healthy'; statusLabel = 'AC Power'; }
+        else { status = 'warning'; statusLabel = 'On UPS power'; }
+      } else if (sh === 'degraded') {
+        status = 'degraded'; statusLabel = 'Degraded';
+      } else if (sh === 'unavailable') {
+        status = 'unavailable'; statusLabel = 'Unavailable';
+      } else {
+        status = 'degraded'; statusLabel = 'Degraded';
+      }
+    }
+  }
+  // Validate fields defensively
+  const powerSource = (data && (data.power_source === 'ac' || data.power_source === 'ups')) ? data.power_source : 'unknown';
+  const battery = (data && typeof data.battery_percent === 'number' && !Number.isNaN(data.battery_percent) && data.battery_percent >= 0 && data.battery_percent <= 100) ? data.battery_percent : null;
+  const upsPresent = (data && typeof data.ups_present === 'boolean') ? data.ups_present : null;
+  const monitorState = (data && (data.monitor_state === 'running' || data.monitor_state === 'stopped')) ? data.monitor_state : 'unknown';
+  const lastUpdated = (data && data.last_updated) ? data.last_updated : null;
+  const lastEvent = (data && typeof data.last_event === 'string') ? data.last_event.slice(0, 500) : '';
+  const sourceHealth = (data && typeof data.source_health === 'string') ? data.source_health : 'unavailable';
+  const hClass = healthClass(sourceHealth, status);
+  const hLabel = healthLabel(sourceHealth, status);
+  // Build HTML with safe() escaping for all API strings
+  const psDisplay = powerSource === 'unknown' ? 'Unknown' : powerSource.toUpperCase();
+  const batDisplay = battery !== null ? battery + '%' : '\u2014';
+  const presDisplay = upsPresent === null ? 'Unknown' : (upsPresent ? 'Yes' : 'No');
+  const monDisplay = monitorState === 'unknown' ? 'Unknown' : monitorState;
+  const luDisplay = fmtTime(lastUpdated);
+  const evDisplay = lastEvent ? safe(lastEvent) : '';
+  const evRow = lastEvent ? `<div class="ups-field ups-event"><span class="ups-label">Last event</span><span class="ups-value">${evDisplay}</span></div>` : '';
+  grid.innerHTML =
+    `<div class="ups-badge ${status}">${safe(statusLabel)}</div>` +
+    `<div class="ups-source ${hClass}">Source: ${safe(hLabel)}</div>` +
+    `<div class="ups-field"><span class="ups-label">Power source</span><span class="ups-value">${safe(psDisplay)}</span></div>` +
+    `<div class="ups-field"><span class="ups-label">Battery</span><span class="ups-value">${safe(batDisplay)}</span></div>` +
+    `<div class="ups-field"><span class="ups-label">UPS present</span><span class="ups-value">${safe(presDisplay)}</span></div>` +
+    `<div class="ups-field"><span class="ups-label">Monitor</span><span class="ups-value">${safe(monDisplay)}</span></div>` +
+    `<div class="ups-field"><span class="ups-label">Last updated</span><span class="ups-value">${safe(luDisplay)}</span></div>` +
+    evRow +
+    `<div class="ups-policy">${safe(POLICY_TEXT)}</div>`;
+  if (ts) ts.textContent = lastUpdated ? 'Updated ' + fmtTime(lastUpdated) : 'No data';
+}
+
 function stageCard(stage,index) {
   const tokens = stage.total_tokens == null ? 'Not recorded' : `${fmt(stage.total_tokens)} total`;
   const report = stage.report ? `<details><summary>Stage report</summary><pre class="report">${safe(stage.report)}</pre></details>` : '<p class="muted-copy">No stage report available.</p>';
@@ -523,9 +616,22 @@ function renderRunningNow(jobs) {
   }).join('');
 }
 
+async function loadUpsStatus() {
+  try {
+    const response = await fetch('/api/ups-status', { cache: 'no-store' });
+    if (_handle401(response)) return;
+    if (!response.ok) { renderUpsStatus(null); return; }
+    const data = await response.json();
+    renderUpsStatus(data);
+  } catch (error) {
+    renderUpsStatus(null);
+  }
+}
+
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
   catch(error) { if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  loadUpsStatus();
 }
 
 function _csrfHeaders() {
