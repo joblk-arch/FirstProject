@@ -1111,6 +1111,10 @@ def _project_dashboard(raw: dict) -> dict:
         raw.get("workflow_bottlenecks")
     )
 
+    result["completion_recovery_summary"] = _safe_completion_recovery_summary(
+        raw.get("completion_recovery_summary")
+    )
+
     return result
 
 
@@ -1466,6 +1470,82 @@ def _safe_workflow_bottlenecks(raw) -> dict | None:
         "stages": stages,
         "highest_time_stage": _derive_bottleneck_highest(stages, "duration_seconds"),
         "highest_token_stage": _derive_bottleneck_highest(stages, "total_tokens"),
+    }
+
+
+def _safe_completion_recovery_summary(raw) -> dict | None:
+    """Project the completion-recovery summary into a fixed, validated shape.
+
+    Returns None for missing/legacy/malformed input so the card can render an
+    empty state without breaking other dashboard fields.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    _COUNT_KEYS = (
+        "sample_count",
+        "implementer_jobs",
+        "observed_jobs",
+        "unknown_jobs",
+        "attempted_jobs",
+        "recovered_jobs",
+        "failed_jobs",
+        "not_attempted_jobs",
+    )
+
+    counts = {}
+    for key in _COUNT_KEYS:
+        val = raw.get(key)
+        if not _is_safe_int(val) or val < 0:
+            return None
+        counts[key] = val
+
+    sample_count = counts["sample_count"]
+    if sample_count > 20:
+        return None
+
+    impl = counts["implementer_jobs"]
+    observed = counts["observed_jobs"]
+    unknown = counts["unknown_jobs"]
+    attempted = counts["attempted_jobs"]
+    recovered = counts["recovered_jobs"]
+    failed = counts["failed_jobs"]
+    not_attempted = counts["not_attempted_jobs"]
+
+    # Invariant: observed + unknown == implementer_jobs
+    if observed + unknown != impl:
+        return None
+    # Invariant: attempted == recovered + failed
+    if attempted != recovered + failed:
+        return None
+    # Invariant: observed == not_attempted + attempted
+    if observed != not_attempted + attempted:
+        return None
+    # sample_count == 0 => all counts 0
+    if sample_count == 0:
+        if any(v != 0 for v in counts.values()):
+            return None
+
+    # Derive rate: recovered/attempted if attempted > 0 else None
+    if attempted > 0:
+        rate = recovered / attempted
+    else:
+        rate = None
+
+    # incomplete: unknown > 0
+    incomplete = unknown > 0
+
+    return {
+        "sample_count": sample_count,
+        "implementer_jobs": impl,
+        "observed_jobs": observed,
+        "unknown_jobs": unknown,
+        "attempted_jobs": attempted,
+        "recovered_jobs": recovered,
+        "failed_jobs": failed,
+        "not_attempted_jobs": not_attempted,
+        "recovery_success_rate": rate,
+        "incomplete": incomplete,
     }
 
 

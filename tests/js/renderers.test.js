@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks', 'renderCompletionRecovery'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -163,7 +163,7 @@ for (const name of REQUIRED) {
   }
 }
 
-const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow, renderUpsStatus } = context;
+const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow, renderUpsStatus, renderCompletionRecovery } = context;
 const $ = (id) => documentStub.getElementById(id);
 
 // --- Tiny check runner ---
@@ -1282,6 +1282,147 @@ check('load catch calls renderWorkflowBottlenecks(null) before Session expired r
   const sessionIdx = catchSrc.indexOf("Session expired");
   assert(sessionIdx !== -1, 'load catch must reference Session expired');
   assert(nullCallIdx < sessionIdx, 'renderWorkflowBottlenecks(null) must appear before Session expired return in catch');
+});
+
+// --- renderCompletionRecovery tests ---
+check('renderCompletionRecovery: valid counts renders data', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 15, implementer_jobs: 15, observed_jobs: 12,
+    unknown_jobs: 3, attempted_jobs: 5, recovered_jobs: 3,
+    failed_jobs: 2, not_attempted_jobs: 7,
+  });
+  assert(el.innerHTML.includes('15'), 'should show sample count');
+  assert(el.innerHTML.includes('60%'), 'should show 60% rate');
+  assert(el.innerHTML.includes('Incomplete'), 'should show incomplete warning');
+});
+
+check('renderCompletionRecovery: rate 0% when all failed', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 10, implementer_jobs: 10, observed_jobs: 10,
+    unknown_jobs: 0, attempted_jobs: 10, recovered_jobs: 0,
+    failed_jobs: 10, not_attempted_jobs: 0,
+  });
+  assert(el.innerHTML.includes('0%'), 'should show 0% rate');
+  assert(!el.innerHTML.includes('Incomplete'), 'should not show incomplete');
+});
+
+check('renderCompletionRecovery: no attempts shows Not attempted', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 10, implementer_jobs: 10, observed_jobs: 10,
+    unknown_jobs: 0, attempted_jobs: 0, recovered_jobs: 0,
+    failed_jobs: 0, not_attempted_jobs: 10,
+  });
+  assert(el.innerHTML.includes('Not attempted'), 'should show Not attempted');
+  assert(!el.innerHTML.includes('0%'), 'should not show 0%');
+  assert(!el.innerHTML.includes('100%'), 'should not show 100%');
+});
+
+check('renderCompletionRecovery: unknown warning', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 5, implementer_jobs: 5, observed_jobs: 0,
+    unknown_jobs: 5, attempted_jobs: 0, recovered_jobs: 0,
+    failed_jobs: 0, not_attempted_jobs: 0,
+  });
+  assert(el.innerHTML.includes('Incomplete'), 'should show incomplete warning for unknown');
+});
+
+check('renderCompletionRecovery: empty sample shows No recent workflows', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 0, implementer_jobs: 0, observed_jobs: 0,
+    unknown_jobs: 0, attempted_jobs: 0, recovered_jobs: 0,
+    failed_jobs: 0, not_attempted_jobs: 0,
+  });
+  assert(el.innerHTML.includes('No recent workflows'), 'should show No recent workflows');
+});
+
+check('renderCompletionRecovery: null shows Unavailable', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery(null);
+  assert(el.innerHTML.includes('Unavailable'), 'should show Unavailable for null');
+});
+
+check('renderCompletionRecovery: bad counts shows Unavailable', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 15, implementer_jobs: 15, observed_jobs: 12,
+    unknown_jobs: 3, attempted_jobs: 5, recovered_jobs: 3,
+    failed_jobs: 2, not_attempted_jobs: 8, // invariant violation: 12 != 8+5
+  });
+  assert(el.innerHTML.includes('Unavailable'), 'should show Unavailable for bad invariants');
+});
+
+check('renderCompletionRecovery: injected metadata is escaped', () => {
+  const el = $('completion-recovery');
+  renderCompletionRecovery({
+    sample_count: 15, implementer_jobs: 15, observed_jobs: 12,
+    unknown_jobs: 3, attempted_jobs: 5, recovered_jobs: 3,
+    failed_jobs: 2, not_attempted_jobs: 7,
+    metadata: '<script>alert("xss")</script>',
+  });
+  assert(!el.innerHTML.includes('<script>'), 'should not contain raw script tag');
+});
+
+check('renderCompletionRecovery: wiring in render()', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../../static/app.js'), 'utf8');
+  assert(src.includes('renderCompletionRecovery(data.completion_recovery_summary)'), 'render must call renderCompletionRecovery');
+});
+
+check('renderCompletionRecovery: wiring in load catch', () => {
+  const src = extractFunction(source, 'load');
+  assert(src !== null, 'load function must exist');
+  const catchIdx = src.indexOf('catch(error)');
+  const catchBlock = src.slice(catchIdx, catchIdx + 300);
+  assert(catchBlock.includes('renderCompletionRecovery(null)'), 'load catch must clear completion recovery');
+  const sessionIdx = catchBlock.indexOf('Session expired');
+  const nullCallIdx = catchBlock.indexOf('renderCompletionRecovery(null)');
+  assert(nullCallIdx >= 0 && sessionIdx >= 0, 'clear and session-expired branches must both exist');
+  assert(nullCallIdx < sessionIdx, 'renderCompletionRecovery(null) must appear before Session expired return');
+});
+
+const crFixture = () => ({sample_count: 15, implementer_jobs: 15, observed_jobs: 12,
+  unknown_jobs: 3, attempted_jobs: 5, recovered_jobs: 3, failed_jobs: 2, not_attempted_jobs: 7});
+const crHtml = (data) => { renderCompletionRecovery(data); return $('completion-recovery').innerHTML; };
+check('Completion recovery: unsafe counts and malformed shapes rejected with heading', () => {
+  for (const key of Object.keys(crFixture())) {
+    for (const bad of [true, false, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', null]) {
+      const data = crFixture(); data[key] = bad;
+      const html = crHtml(data);
+      assert(html.includes('Unavailable') && html.includes('<h2>Completion recovery</h2>'), html);
+    }
+  }
+  for (const data of [null, [], 'legacy', {}, {sample_count: 0}]) {
+    assert(crHtml(data).includes('Unavailable'));
+  }
+});
+check('Completion recovery: valid, empty and unavailable retain heading; rate and warning derived', () => {
+  const data = crFixture(); data.recovery_success_rate = '<img onerror=alert(1)>'; data.incomplete = false;
+  let html = crHtml(data);
+  assert(html.includes('60%') && html.includes('Incomplete') && !html.includes('<img'), html);
+  assert(html.includes('Latest 15 workflows (up to 20)'), html);
+  assert(html.includes('Missing historical telemetry is not zero') && html.includes('not proof of code correctness'), html);
+  const empty = Object.fromEntries(Object.keys(crFixture()).map(key => [key, 0]));
+  html = crHtml(empty);
+  assert(html.includes('No recent workflows') && html.includes('<h2>Completion recovery</h2>'), html);
+  html = crHtml(null);
+  assert(html.includes('Unavailable') && html.includes('<h2>Completion recovery</h2>'), html);
+});
+check('Completion recovery: unknown-only never claims a measured recovery rate', () => {
+  const data = {sample_count: 1, implementer_jobs: 3, observed_jobs: 0, unknown_jobs: 3,
+    attempted_jobs: 0, recovered_jobs: 0, failed_jobs: 0, not_attempted_jobs: 0};
+  const html = crHtml(data);
+  assert(html.includes('Unknown: 3') && html.includes('Not attempted') && html.includes('Incomplete'), html);
+  assert(!html.includes('0%') && !html.includes('100%'), html);
+});
+check('Completion recovery: each accounting invariant and empty-window activity fail closed', () => {
+  for (const key of ['implementer_jobs', 'attempted_jobs', 'observed_jobs', 'sample_count']) {
+    const data = crFixture(); data[key] = key === 'sample_count' ? 0 : data[key] + 1;
+    assert(crHtml(data).includes('Unavailable'), key);
+  }
 });
 
 console.log(`\n${passed}/${total} checks passed`);

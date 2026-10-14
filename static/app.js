@@ -44,6 +44,7 @@ function repairBadge(state, attempts, max) {
 function render(data) {
   renderRecentWorkflowReliability(data.recent_workflow_reliability);
   renderWorkflowBottlenecks(data.workflow_bottlenecks);
+  renderCompletionRecovery(data.completion_recovery_summary);
   const jobs = data.jobs || [], usage = data.usage || [], counts = data.counts || [];
   const active = jobs.filter((j) => ['queued', 'running'].includes(j.status)).length;
   const failed = jobs.filter((j) => ['failed', 'blocked'].includes(j.status)).length;
@@ -632,7 +633,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
@@ -929,4 +930,72 @@ function renderWorkflowBottlenecks(data) {
     `<p class="reliability-note">Latest ${sample} workflows (up to 20) \u00b7 Highest time: ${timeWinner} \u00b7 Highest tokens: ${tokenWinner}</p>` +
     `<table class="reliability-table"><thead><tr><th>Stage</th><th>Jobs</th><th>Recorded time</th><th>Recorded tokens</th><th>Timing coverage</th><th>Token coverage</th></tr></thead><tbody>${body}</tbody></table>` +
     '<p class="reliability-note">Summed recorded job wall time includes attempts/overlaps, excludes between-job waits, not GPU-only. Incomplete rankings may change.</p>';
+}
+
+function renderCompletionRecovery(data) {
+  const el = $('completion-recovery');
+  if (!el) return;
+  const heading = '<h2>Completion recovery</h2>';
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  const keys = ['sample_count','implementer_jobs','observed_jobs','unknown_jobs','attempted_jobs','recovered_jobs','failed_jobs','not_attempted_jobs'];
+  const counts = {};
+  for (const k of keys) {
+    const v = data[k];
+    if (typeof v !== 'number' || v < 0 || !Number.isSafeInteger(v)) {
+      el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+      return;
+    }
+    counts[k] = v;
+  }
+  const {sample_count, implementer_jobs, observed_jobs, unknown_jobs, attempted_jobs, recovered_jobs, failed_jobs, not_attempted_jobs} = counts;
+  // Invariants
+  if (observed_jobs + unknown_jobs !== implementer_jobs) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  if (attempted_jobs !== recovered_jobs + failed_jobs) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  if (observed_jobs !== not_attempted_jobs + attempted_jobs) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  if (sample_count > 20) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  if (sample_count === 0) {
+    if (implementer_jobs !== 0 || observed_jobs !== 0 || unknown_jobs !== 0 || attempted_jobs !== 0 || recovered_jobs !== 0 || failed_jobs !== 0 || not_attempted_jobs !== 0) {
+      el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+      return;
+    }
+    el.innerHTML = heading + '<p class="reliability-note">No recent workflows</p>';
+    return;
+  }
+  // Derive rate
+  let rateText;
+  if (attempted_jobs > 0) {
+    const rate = recovered_jobs / attempted_jobs;
+    rateText = `${Math.round(rate * 100)}%`;
+  } else {
+    rateText = 'Not attempted';
+  }
+  const incomplete = unknown_jobs > 0;
+  const warning = incomplete ? '<p class="reliability-note" role="alert">Incomplete: unknown historical data</p>' : '';
+  const rows = [
+    `Latest ${sample_count} workflows (up to 20)`,
+    `Implementer jobs: ${implementer_jobs}`,
+    `Observed: ${observed_jobs}`,
+    `Unknown: ${unknown_jobs}`,
+    `Attempted: ${attempted_jobs}`,
+    `Recovered: ${recovered_jobs}`,
+    `Failed: ${failed_jobs}`,
+    `Not attempted: ${not_attempted_jobs}`,
+    `Recovery rate: ${rateText}`,
+  ].map(t => `<span class="reliability-note">${safe(t)}</span>`).join('');
+  el.innerHTML = `${heading}${warning}<div class="reliability-grid">${rows}</div><p class="reliability-note">Only recorded completion continuations; workflow window excludes standalone. Missing historical telemetry is not zero. Counters are not proof of code correctness.</p>`;
 }
