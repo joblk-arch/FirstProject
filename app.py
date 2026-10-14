@@ -1107,6 +1107,10 @@ def _project_dashboard(raw: dict) -> dict:
         raw.get("recent_workflow_reliability")
     )
 
+    result["workflow_bottlenecks"] = _safe_workflow_bottlenecks(
+        raw.get("workflow_bottlenecks")
+    )
+
     return result
 
 
@@ -1334,6 +1338,134 @@ def _safe_recent_workflow_reliability(raw) -> dict | None:
         "timing_observed_jobs": timing_observed,
         "timing_missing_jobs": timing_missing,
         "timing_incomplete": timing_incomplete,
+    }
+
+
+_WORKFLOW_BOTTLENECK_STAGES = ("plan", "implement", "test", "review", "reason", "unknown")
+
+
+def _is_safe_number(value) -> bool:
+    """True for a finite, non-bool number within [0, JS_SAFE_INT_MAX]."""
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    if value < 0 or value > _JS_SAFE_INT_MAX:
+        return False
+    return True
+
+
+def _validate_bottleneck_stage(stage: str, row: dict, sample_count: int) -> dict | None:
+    """Validate one workflow-bottleneck stage row; None if any field is invalid."""
+    job_count = row.get("job_count")
+    if not _is_safe_int(job_count):
+        return None
+
+    timing_observed = row.get("timing_observed_jobs")
+    timing_missing = row.get("timing_missing_jobs")
+    if not _is_safe_int(timing_observed) or not _is_safe_int(timing_missing):
+        return None
+    if timing_observed + timing_missing > job_count:
+        return None
+
+    token_measured = row.get("token_measured_jobs")
+    token_missing = row.get("token_missing_jobs")
+    if not _is_safe_int(token_measured) or not _is_safe_int(token_missing):
+        return None
+    if token_measured + token_missing != job_count:
+        return None
+
+    # An empty sample window must not fabricate per-stage activity.
+    if sample_count == 0 and job_count != 0:
+        return None
+
+    duration_seconds = row.get("duration_seconds")
+    if timing_observed == 0:
+        if duration_seconds is not None:
+            return None
+    elif not _is_safe_number(duration_seconds):
+        return None
+
+    total_tokens = row.get("total_tokens")
+    if token_measured == 0:
+        if total_tokens is not None:
+            return None
+    elif not _is_safe_int(total_tokens):
+        return None
+
+    return {
+        "stage": stage,
+        "job_count": job_count,
+        "duration_seconds": duration_seconds,
+        "timing_observed_jobs": timing_observed,
+        "timing_missing_jobs": timing_missing,
+        "timing_incomplete": timing_missing > 0,
+        "total_tokens": total_tokens,
+        "token_measured_jobs": token_measured,
+        "token_missing_jobs": token_missing,
+        "tokens_incomplete": token_missing > 0,
+    }
+
+
+def _derive_bottleneck_highest(stages: list, key: str) -> str | None:
+    """Highest strictly-positive value in fixed stage order; None if none."""
+    best_stage = None
+    best_value = None
+    for s in stages:
+        value = s[key]
+        if value is None or value <= 0:
+            continue
+        if best_value is None or value > best_value:
+            best_value = value
+            best_stage = s["stage"]
+    return best_stage
+
+
+def _safe_workflow_bottlenecks(raw) -> dict | None:
+    """Project the workflow-bottlenecks summary into a fixed, validated shape.
+
+    Returns None for missing/legacy/malformed input so the card can render an
+    empty state without breaking other dashboard fields.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    sample_count = raw.get("sample_count")
+    if not _is_safe_int(sample_count) or sample_count > 20:
+        return None
+
+    stages_raw = raw.get("stages")
+    if not isinstance(stages_raw, list):
+        return None
+
+    rows_by_stage = {}
+    for row in stages_raw:
+        if not isinstance(row, dict):
+            return None
+        stage = row.get("stage")
+        if not isinstance(stage, str) or stage not in _WORKFLOW_BOTTLENECK_STAGES:
+            return None
+        if stage in rows_by_stage:
+            return None
+        rows_by_stage[stage] = row
+
+    if set(rows_by_stage) != set(_WORKFLOW_BOTTLENECK_STAGES):
+        return None
+
+    stages = []
+    for stage in _WORKFLOW_BOTTLENECK_STAGES:
+        validated = _validate_bottleneck_stage(stage, rows_by_stage[stage], sample_count)
+        if validated is None:
+            return None
+        stages.append(validated)
+
+    return {
+        "sample_count": sample_count,
+        "stages": stages,
+        "highest_time_stage": _derive_bottleneck_highest(stages, "duration_seconds"),
+        "highest_token_stage": _derive_bottleneck_highest(stages, "total_tokens"),
     }
 
 

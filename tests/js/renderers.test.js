@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -958,6 +958,330 @@ check('Timing breakdown: missing counts stay unavailable; actual zero coverage s
     html = recentHtml(data);
     assert(html.includes('Timing coverage: Unavailable'), html);
   }
+});
+
+// --- Workflow bottlenecks tests ---
+const wbFixture = () => ({
+  sample_count: 5,
+  stages: [
+    { stage: 'plan', job_count: 5, duration_seconds: 120, timing_observed_jobs: 5, timing_missing_jobs: 0, timing_incomplete: false, total_tokens: 1000, token_measured_jobs: 5, token_missing_jobs: 0, tokens_incomplete: false },
+    { stage: 'implement', job_count: 5, duration_seconds: 300, timing_observed_jobs: 5, timing_missing_jobs: 0, timing_incomplete: false, total_tokens: 5000, token_measured_jobs: 5, token_missing_jobs: 0, tokens_incomplete: false },
+    { stage: 'test', job_count: 5, duration_seconds: 200, timing_observed_jobs: 5, timing_missing_jobs: 0, timing_incomplete: false, total_tokens: 2000, token_measured_jobs: 5, token_missing_jobs: 0, tokens_incomplete: false },
+    { stage: 'review', job_count: 5, duration_seconds: 50, timing_observed_jobs: 5, timing_missing_jobs: 0, timing_incomplete: false, total_tokens: 500, token_measured_jobs: 5, token_missing_jobs: 0, tokens_incomplete: false },
+    { stage: 'reason', job_count: 5, duration_seconds: 30, timing_observed_jobs: 5, timing_missing_jobs: 0, timing_incomplete: false, total_tokens: 300, token_measured_jobs: 5, token_missing_jobs: 0, tokens_incomplete: false },
+    { stage: 'unknown', job_count: 5, duration_seconds: 10, timing_observed_jobs: 5, timing_missing_jobs: 0, timing_incomplete: false, total_tokens: 100, token_measured_jobs: 5, token_missing_jobs: 0, tokens_incomplete: false },
+  ],
+  highest_time_stage: 'implement',
+  highest_token_stage: 'implement',
+});
+const wbHtml = (data) => {
+  context.renderWorkflowBottlenecks(data);
+  return $('workflow-bottlenecks').innerHTML;
+};
+const wbEmptyStage = (stage) => ({ stage, job_count: 0, duration_seconds: null, timing_observed_jobs: 0, timing_missing_jobs: 0, total_tokens: null, token_measured_jobs: 0, token_missing_jobs: 0 });
+const wbEmptyStages = () => ['plan', 'implement', 'test', 'review', 'reason', 'unknown'].map(wbEmptyStage);
+
+check('Workflow bottlenecks: valid data renders six stages with winners', () => {
+  const html = wbHtml(wbFixture());
+  assert(html.includes('Latest 5 workflows'), html);
+  assert(html.includes('Highest time: implement'), html);
+  assert(html.includes('Highest tokens: implement'), html);
+  for (const s of ['plan', 'implement', 'test', 'review', 'reason', 'unknown']) {
+    assert(html.includes(s), `${s} absent: ${html}`);
+  }
+  assert(html.includes('300.0s'), html);
+  assert(html.includes('5000'), html);
+  assert(!html.includes('Unavailable'), html);
+  assert(html.includes('attempts/overlaps'), html);
+  assert(html.includes('not GPU-only'), html);
+  assert(html.includes('Incomplete rankings may change'), html);
+});
+
+check('Workflow bottlenecks: zero measurements display 0', () => {
+  const data = wbFixture();
+  for (const st of data.stages) {
+    st.duration_seconds = 0;
+    st.total_tokens = 0;
+  }
+  const html = wbHtml(data);
+  assert(html.includes('Highest time: None'), html);
+  assert(html.includes('Highest tokens: None'), html);
+  assert(html.includes('>0<'), html);
+  assert(!html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: null data shows Unavailable', () => {
+  const html = wbHtml(null);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: sample_count 0 shows No recent workflows', () => {
+  const html = wbHtml({ sample_count: 0, stages: wbEmptyStages() });
+  assert(html.includes('No recent workflows'), html);
+  assert(!html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: malformed stages (wrong count) shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages = data.stages.slice(0, 5);
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: duplicate stage names show Unavailable', () => {
+  const data = wbFixture();
+  data.stages[1].stage = 'plan';
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: unknown stage name shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0].stage = 'deploy';
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: wrong stage order shows Unavailable', () => {
+  const data = wbFixture();
+  [data.stages[0], data.stages[1]] = [data.stages[1], data.stages[0]];
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: counts inconsistency shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0].timing_observed_jobs = 4;
+  data.stages[0].timing_missing_jobs = 2;
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: negative duration shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0].duration_seconds = -1;
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: non-integer job_count shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0].job_count = 1.5;
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: NaN duration shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0].duration_seconds = NaN;
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: Infinity tokens shows Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0].total_tokens = Infinity;
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: incomplete flags derived from missing jobs', () => {
+  const data = wbFixture();
+  data.stages[0].timing_observed_jobs = 3;
+  data.stages[0].timing_missing_jobs = 2;
+  data.stages[0].timing_incomplete = false;
+  const html = wbHtml(data);
+  assert(html.includes('3 measured / 2 missing \u2014 Incomplete'), html);
+});
+
+check('Workflow bottlenecks: zero observed derives incomplete', () => {
+  const data = wbFixture();
+  data.stages[0].timing_observed_jobs = 0;
+  data.stages[0].timing_missing_jobs = 5;
+  data.stages[0].duration_seconds = null;
+  data.stages[0].timing_incomplete = false;
+  const html = wbHtml(data);
+  assert(html.includes('0 measured / 5 missing \u2014 Incomplete'), html);
+});
+
+check('Workflow bottlenecks: complete data has no Incomplete flag', () => {
+  const html = wbHtml(wbFixture());
+  assert(!html.includes('\u2014 Incomplete'), html);
+});
+
+check('Workflow bottlenecks: winners recomputed strictly positive fixed order', () => {
+  const data = wbFixture();
+  data.stages[0].duration_seconds = 500;
+  data.stages[1].duration_seconds = 500;
+  data.highest_time_stage = 'implement';
+  const html = wbHtml(data);
+  assert(html.includes('Highest time: plan'), `plan should win tie by fixed order: ${html}`);
+});
+
+check('Workflow bottlenecks: zero duration excluded from winner', () => {
+  const data = wbFixture();
+  for (const st of data.stages) st.duration_seconds = 0;
+  data.stages[2].duration_seconds = 10;
+  const html = wbHtml(data);
+  assert(html.includes('Highest time: test'), html);
+});
+
+check('Workflow bottlenecks: sample_count > 20 shows Unavailable', () => {
+  const html = wbHtml({ sample_count: 21, stages: [] });
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: sample_count non-integer shows Unavailable', () => {
+  const html = wbHtml({ sample_count: 1.5, stages: [] });
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: sample_count negative shows Unavailable', () => {
+  const html = wbHtml({ sample_count: -1, stages: [] });
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: missing stages array shows Unavailable', () => {
+  const html = wbHtml({ sample_count: 5 });
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: non-object data shows Unavailable', () => {
+  assert(wbHtml('string').includes('Unavailable'));
+  assert(wbHtml(42).includes('Unavailable'));
+  assert(wbHtml([]).includes('Unavailable'));
+});
+
+check('Workflow bottlenecks: malicious stage name escaped', () => {
+  const data = wbFixture();
+  data.stages[0].stage = '<script>alert(1)</script>';
+  const html = wbHtml(data);
+  assert(html.includes('Unavailable'), html);
+});
+
+check('Workflow bottlenecks: reason/unknown empty stages render remaining rows', () => {
+  const data = wbFixture();
+  data.stages[4] = wbEmptyStage('reason');
+  data.stages[5] = wbEmptyStage('unknown');
+  const html = wbHtml(data);
+  assert(!html.includes('reliability-note">Unavailable'), 'must not be whole-card Unavailable: ' + html);
+  assert(html.includes('Latest 5 workflows'), html);
+  assert(html.includes('>Unavailable<'), 'empty rows must show Unavailable: ' + html);
+  assert(html.includes('plan'), html);
+  assert(html.includes('implement'), html);
+});
+
+check('Workflow bottlenecks: partially unexecuted stage valid', () => {
+  const data = wbFixture();
+  data.stages[0] = { stage: 'plan', job_count: 3, duration_seconds: 5, timing_observed_jobs: 1, timing_missing_jobs: 0, total_tokens: 100, token_measured_jobs: 1, token_missing_jobs: 2 };
+  const html = wbHtml(data);
+  assert(!html.includes('reliability-note">Unavailable'), html);
+  assert(html.includes('5.0s'), html);
+  assert(html.includes('>100<'), html);
+  assert(html.includes('1 measured / 0 missing'), html);
+  assert(html.includes('1 measured / 2 missing \u2014 Incomplete'), html);
+});
+
+check('Workflow bottlenecks: all queued stage valid row Unavailable', () => {
+  const data = wbFixture();
+  data.stages[0] = { stage: 'plan', job_count: 4, duration_seconds: null, timing_observed_jobs: 0, timing_missing_jobs: 0, total_tokens: null, token_measured_jobs: 0, token_missing_jobs: 4 };
+  const html = wbHtml(data);
+  assert(!html.includes('reliability-note">Unavailable'), html);
+  assert(html.includes('>Unavailable<'), html);
+  assert(html.includes('0 measured / 0 missing'), html);
+  assert(html.includes('0 measured / 4 missing \u2014 Incomplete'), html);
+});
+
+check('Workflow bottlenecks: observed 0 with non-null time rejects card', () => {
+  const data = wbFixture();
+  data.stages[0].timing_observed_jobs = 0;
+  data.stages[0].timing_missing_jobs = 5;
+  data.stages[0].duration_seconds = 120;
+  const html = wbHtml(data);
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: measured 0 with non-null total rejects card', () => {
+  const data = wbFixture();
+  data.stages[0].token_measured_jobs = 0;
+  data.stages[0].token_missing_jobs = 5;
+  data.stages[0].total_tokens = 1000;
+  const html = wbHtml(data);
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: measured 0 with zero value rejects card', () => {
+  const data = wbFixture();
+  data.stages[0].token_measured_jobs = 0;
+  data.stages[0].token_missing_jobs = 5;
+  data.stages[0].total_tokens = 0;
+  const html = wbHtml(data);
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: observed 0 with zero duration rejects card', () => {
+  const data = wbFixture();
+  data.stages[0].timing_observed_jobs = 0;
+  data.stages[0].timing_missing_jobs = 5;
+  data.stages[0].duration_seconds = 0;
+  const html = wbHtml(data);
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: float tokens rejected', () => {
+  const data = wbFixture();
+  data.stages[0].total_tokens = 1.5;
+  const html = wbHtml(data);
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: sample 0 with missing rows invalid', () => {
+  const html = wbHtml({ sample_count: 0, stages: wbEmptyStages().slice(0, 5) });
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: sample 0 with activity invalid', () => {
+  const stages = wbEmptyStages();
+  stages[0].job_count = 3;
+  stages[0].timing_observed_jobs = 3;
+  stages[0].timing_missing_jobs = 0;
+  stages[0].duration_seconds = 10;
+  stages[0].token_measured_jobs = 3;
+  stages[0].token_missing_jobs = 0;
+  stages[0].total_tokens = 100;
+  const html = wbHtml({ sample_count: 0, stages });
+  assert(html.includes('reliability-note">Unavailable'), html);
+});
+
+check('Workflow bottlenecks: all-zero unexecuted stage no Incomplete', () => {
+  const data = wbFixture();
+  data.stages[0] = { stage: 'plan', job_count: 3, duration_seconds: null, timing_observed_jobs: 0, timing_missing_jobs: 0, total_tokens: null, token_measured_jobs: 0, token_missing_jobs: 3 };
+  const html = wbHtml(data);
+  assert(!html.includes('reliability-note">Unavailable'), html);
+  assert(html.includes('0 measured / 0 missing'), html);
+  assert(!html.includes('0 measured / 0 missing \u2014 Incomplete'), html);
+});
+
+// --- Wiring: render calls renderWorkflowBottlenecks ---
+check('render calls renderWorkflowBottlenecks(data.workflow_bottlenecks)', () => {
+  const renderSrc = extractFunction(source, 'render');
+  assert(renderSrc !== null, 'render function must exist');
+  assert(renderSrc.includes('renderWorkflowBottlenecks(data.workflow_bottlenecks)'),
+    'render must call renderWorkflowBottlenecks(data.workflow_bottlenecks)');
+});
+
+// --- Wiring: load catch calls renderWorkflowBottlenecks(null) before Session expired return ---
+check('load catch calls renderWorkflowBottlenecks(null) before Session expired return', () => {
+  const loadSrc = extractFunction(source, 'load');
+  assert(loadSrc !== null, 'load function must exist');
+  const catchIdx = loadSrc.indexOf('catch');
+  assert(catchIdx !== -1, 'load must have a catch block');
+  const catchSrc = loadSrc.slice(catchIdx);
+  const nullCallIdx = catchSrc.indexOf('renderWorkflowBottlenecks(null)');
+  assert(nullCallIdx !== -1, 'load catch must call renderWorkflowBottlenecks(null)');
+  const sessionIdx = catchSrc.indexOf("Session expired");
+  assert(sessionIdx !== -1, 'load catch must reference Session expired');
+  assert(nullCallIdx < sessionIdx, 'renderWorkflowBottlenecks(null) must appear before Session expired return in catch');
 });
 
 console.log(`\n${passed}/${total} checks passed`);

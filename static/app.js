@@ -43,6 +43,7 @@ function repairBadge(state, attempts, max) {
 
 function render(data) {
   renderRecentWorkflowReliability(data.recent_workflow_reliability);
+  renderWorkflowBottlenecks(data.workflow_bottlenecks);
   const jobs = data.jobs || [], usage = data.usage || [], counts = data.counts || [];
   const active = jobs.filter((j) => ['queued', 'running'].includes(j.status)).length;
   const failed = jobs.filter((j) => ['failed', 'blocked'].includes(j.status)).length;
@@ -631,7 +632,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { renderRecentWorkflowReliability(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
@@ -851,4 +852,81 @@ function renderRecentWorkflowReliability(data) {
     stageHtml(data.failure_stage_counts, 'Failed stages') + stageHtml(data.blocked_stage_counts, 'Blocked stages') +
     '<p class="reliability-note">Active and excluded workflows are not in the success-rate denominator. Historical canaries are included.</p>' +
     '<p class="reliability-note">Execution time is recorded job wall time, not GPU-only compute. Gaps exclude initial queue wait; timestamps do not identify cause.</p>';
+}
+
+function renderWorkflowBottlenecks(data) {
+  const card = $('workflow-bottlenecks');
+  if (!card) return;
+  const si = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) ? v : null;
+  const sd = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER) ? v : null;
+  const unavail = () => { card.innerHTML = '<h2>Workflow bottlenecks</h2><p class="reliability-note">Unavailable</p>'; };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) { unavail(); return; }
+  const sample = si(data.sample_count);
+  if (sample === null || sample > 20) { unavail(); return; }
+  const KNOWN_STAGES = ['plan', 'implement', 'test', 'review', 'reason', 'unknown'];
+  if (!Array.isArray(data.stages) || data.stages.length !== 6) { unavail(); return; }
+  const seen = new Set();
+  const rows = [];
+  for (let i = 0; i < 6; i++) {
+    const st = data.stages[i];
+    if (!st || typeof st !== 'object' || Array.isArray(st)) { unavail(); return; }
+    if (st.stage !== KNOWN_STAGES[i]) { unavail(); return; }
+    if (seen.has(st.stage)) { unavail(); return; }
+    seen.add(st.stage);
+    const jc = si(st.job_count);
+    if (jc === null) { unavail(); return; }
+    const to = si(st.timing_observed_jobs);
+    if (to === null) { unavail(); return; }
+    const tmi = si(st.timing_missing_jobs);
+    if (tmi === null) { unavail(); return; }
+    if (to + tmi > jc) { unavail(); return; }
+    const km = si(st.token_measured_jobs);
+    if (km === null) { unavail(); return; }
+    const kmi = si(st.token_missing_jobs);
+    if (kmi === null) { unavail(); return; }
+    if (km + kmi !== jc) { unavail(); return; }
+    let ds;
+    if (to === 0) {
+      if (st.duration_seconds !== null) { unavail(); return; }
+      ds = null;
+    } else {
+      ds = sd(st.duration_seconds);
+      if (ds === null) { unavail(); return; }
+    }
+    let tt;
+    if (km === 0) {
+      if (st.total_tokens !== null) { unavail(); return; }
+      tt = null;
+    } else {
+      tt = si(st.total_tokens);
+      if (tt === null) { unavail(); return; }
+    }
+    rows.push({ stage: st.stage, jc, ds, to, tmi, tt, km, kmi });
+  }
+  if (sample === 0) {
+    if (rows.some((r) => r.jc !== 0)) { unavail(); return; }
+    card.innerHTML = '<h2>Workflow bottlenecks</h2><p class="reliability-note">No recent workflows</p>';
+    return;
+  }
+  let highestTime = null, highestToken = null;
+  let maxTime = 0, maxToken = 0;
+  for (const r of rows) {
+    if (r.ds !== null && r.ds > 0 && r.ds > maxTime) { maxTime = r.ds; highestTime = r.stage; }
+    if (r.tt !== null && r.tt > 0 && r.tt > maxToken) { maxToken = r.tt; highestToken = r.stage; }
+  }
+  const body = rows.map((r) => {
+    const timingIncomplete = r.tmi > 0;
+    const tokensIncomplete = r.kmi > 0;
+    const timeStr = r.ds === null ? 'Unavailable' : (r.ds > 0 ? r.ds.toFixed(1) + 's' : '0');
+    const tokenStr = r.tt === null ? 'Unavailable' : (r.tt > 0 ? String(r.tt) : '0');
+    const timingCov = `${r.to} measured / ${r.tmi} missing` + (timingIncomplete ? ' \u2014 Incomplete' : '');
+    const tokenCov = `${r.km} measured / ${r.kmi} missing` + (tokensIncomplete ? ' \u2014 Incomplete' : '');
+    return `<tr><td>${safe(r.stage)}</td><td>${r.jc}</td><td>${timeStr}</td><td>${tokenStr}</td><td>${timingCov}</td><td>${tokenCov}</td></tr>`;
+  }).join('');
+  const timeWinner = highestTime ? safe(highestTime) : 'None';
+  const tokenWinner = highestToken ? safe(highestToken) : 'None';
+  card.innerHTML = `<h2>Workflow bottlenecks</h2>` +
+    `<p class="reliability-note">Latest ${sample} workflows (up to 20) \u00b7 Highest time: ${timeWinner} \u00b7 Highest tokens: ${tokenWinner}</p>` +
+    `<table class="reliability-table"><thead><tr><th>Stage</th><th>Jobs</th><th>Recorded time</th><th>Recorded tokens</th><th>Timing coverage</th><th>Token coverage</th></tr></thead><tbody>${body}</tbody></table>` +
+    '<p class="reliability-note">Summed recorded job wall time includes attempts/overlaps, excludes between-job waits, not GPU-only. Incomplete rankings may change.</p>';
 }
