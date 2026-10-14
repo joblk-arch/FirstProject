@@ -1279,6 +1279,45 @@ def _safe_recent_workflow_reliability(raw) -> dict | None:
     duration = _safe_duration(raw.get("duration"))
     tokens = _safe_tokens(raw.get("tokens"))
 
+    # --- New timing projection keys (additive, non-breaking) ---
+    assessed = successful + failed
+
+    # job_execution_duration: project via _safe_duration, None if missing/malformed
+    job_exec = _safe_duration(raw.get("job_execution_duration"))
+    if job_exec is not None:
+        if duration is not None and duration.get("sample_count") is not None:
+            if job_exec["sample_count"] is not None and job_exec["sample_count"] > duration["sample_count"]:
+                job_exec = None
+        if job_exec is not None and job_exec["sample_count"] is not None and job_exec["sample_count"] > assessed:
+            job_exec = None
+
+    # between_job_gaps: same pattern
+    gaps = _safe_duration(raw.get("between_job_gaps"))
+    if gaps is not None:
+        if duration is not None and duration.get("sample_count") is not None:
+            if gaps["sample_count"] is not None and gaps["sample_count"] > duration["sample_count"]:
+                gaps = None
+        if gaps is not None and gaps["sample_count"] is not None and gaps["sample_count"] > assessed:
+            gaps = None
+
+    # timing_observed_jobs: JS-safe non-negative int else None
+    timing_observed = raw.get("timing_observed_jobs")
+    if timing_observed is not None:
+        if not _is_safe_int(timing_observed) or timing_observed < 0:
+            timing_observed = None
+
+    # timing_missing_jobs: JS-safe non-negative int else None
+    timing_missing = raw.get("timing_missing_jobs")
+    if timing_missing is not None:
+        if not _is_safe_int(timing_missing) or timing_missing < 0:
+            timing_missing = None
+
+    # timing_incomplete: derived from validated missing count, don't trust raw bool
+    if timing_missing is None:
+        timing_incomplete = None
+    else:
+        timing_incomplete = timing_missing > 0
+
     return {
         "sample_count": sample_count,
         "successful": successful,
@@ -1290,6 +1329,11 @@ def _safe_recent_workflow_reliability(raw) -> dict | None:
         "blocked_stage_counts": blocked_stage_counts,
         "duration": duration,
         "tokens": tokens,
+        "job_execution_duration": job_exec,
+        "between_job_gaps": gaps,
+        "timing_observed_jobs": timing_observed,
+        "timing_missing_jobs": timing_missing,
+        "timing_incomplete": timing_incomplete,
     }
 
 

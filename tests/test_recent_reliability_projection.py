@@ -564,3 +564,251 @@ class TestSafeDurationIntegration:
         assert result is not None
         assert result["median_seconds"] is None
         assert result["average_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# New timing projection keys tests
+# ---------------------------------------------------------------------------
+
+def _timing_base():
+    """Base healthy window with timing fields for new projection tests."""
+    return {
+        "sample_count": 1,
+        "successful": 1,
+        "failed": 0,
+        "active": 0,
+        "excluded": 0,
+        "rate": 1.0,
+        "failure_stage_counts": {},
+        "blocked_stage_counts": {},
+        "duration": {
+            "sample_count": 1,
+            "median_seconds": 130.0,
+            "average_seconds": 130.0,
+        },
+        "tokens": {
+            "total": 1000,
+            "measured_jobs": 1,
+            "missing_jobs": 0,
+            "incomplete": False,
+        },
+    }
+
+
+def test_timing_valid_elapsed_130_exec_30_gap_100():
+    """New valid: elapsed 130, execution 30, gap 100, matched sample 1."""
+    raw = _timing_base()
+    raw["job_execution_duration"] = {
+        "sample_count": 1,
+        "median_seconds": 30.0,
+        "average_seconds": 30.0,
+    }
+    raw["between_job_gaps"] = {
+        "sample_count": 1,
+        "median_seconds": 100.0,
+        "average_seconds": 100.0,
+    }
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 0
+    raw["timing_incomplete"] = False
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    # Existing duration preserved unchanged
+    assert result["duration"]["median_seconds"] == 130.0
+    assert result["duration"]["average_seconds"] == 130.0
+    assert result["duration"]["sample_count"] == 1
+    # New timing keys
+    assert result["job_execution_duration"]["sample_count"] == 1
+    assert result["job_execution_duration"]["median_seconds"] == 30.0
+    assert result["job_execution_duration"]["average_seconds"] == 30.0
+    assert result["between_job_gaps"]["sample_count"] == 1
+    assert result["between_job_gaps"]["median_seconds"] == 100.0
+    assert result["between_job_gaps"]["average_seconds"] == 100.0
+    assert result["timing_observed_jobs"] == 1
+    assert result["timing_missing_jobs"] == 0
+    assert result["timing_incomplete"] is False
+
+
+def test_timing_overlap_elapsed_30_exec_30_gap_0():
+    """Overlap: elapsed 30, exec 30, gap 0 — valid zero gap."""
+    raw = _timing_base()
+    raw["duration"] = {
+        "sample_count": 1,
+        "median_seconds": 30.0,
+        "average_seconds": 30.0,
+    }
+    raw["job_execution_duration"] = {
+        "sample_count": 1,
+        "median_seconds": 30.0,
+        "average_seconds": 30.0,
+    }
+    raw["between_job_gaps"] = {
+        "sample_count": 1,
+        "median_seconds": 0.0,
+        "average_seconds": 0.0,
+    }
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 0
+    raw["timing_incomplete"] = False
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    assert result["duration"]["median_seconds"] == 30.0
+    assert result["job_execution_duration"]["median_seconds"] == 30.0
+    assert result["between_job_gaps"]["median_seconds"] == 0.0
+    assert result["between_job_gaps"]["average_seconds"] == 0.0
+    assert result["timing_incomplete"] is False
+
+
+def test_timing_legacy_fields_missing_old_summary_valid_new_none():
+    """Legacy fields missing => old summary still valid, new keys None."""
+    raw = _timing_base()
+    # No job_execution_duration, between_job_gaps, timing_* fields at all
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    # Old summary intact
+    assert result["duration"]["median_seconds"] == 130.0
+    assert result["sample_count"] == 1
+    assert result["successful"] == 1
+    # New keys all None
+    assert result["job_execution_duration"] is None
+    assert result["between_job_gaps"] is None
+    assert result["timing_observed_jobs"] is None
+    assert result["timing_missing_jobs"] is None
+    assert result["timing_incomplete"] is None
+
+
+def test_timing_huge_nan_bool_invalid_new_secs_safe_none():
+    """Huge/NaN/bool invalid new seconds => safe None fields, old summary preserved."""
+    raw = _timing_base()
+    raw["job_execution_duration"] = {
+        "sample_count": 1,
+        "median_seconds": float("inf"),
+        "average_seconds": 30.0,
+    }
+    raw["between_job_gaps"] = {
+        "sample_count": 1,
+        "median_seconds": True,  # bool is not a valid number
+        "average_seconds": 100.0,
+    }
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 0
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    # Old summary preserved
+    assert result["duration"]["median_seconds"] == 130.0
+    # Invalid new metric fields => None (via _safe_duration)
+    assert result["job_execution_duration"]["median_seconds"] is None
+    assert result["between_job_gaps"]["median_seconds"] is None
+    # Counts still valid
+    assert result["timing_observed_jobs"] == 1
+    assert result["timing_missing_jobs"] == 0
+    assert result["timing_incomplete"] is False
+
+
+def test_timing_missing_counts_unknown_not_zero():
+    """Missing timing counts => None, not 0."""
+    raw = _timing_base()
+    # No timing_observed_jobs or timing_missing_jobs
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    assert result["timing_observed_jobs"] is None
+    assert result["timing_missing_jobs"] is None
+    assert result["timing_incomplete"] is None
+
+
+def test_timing_incomplete_derived_true_despite_raw_false():
+    """timing_incomplete derived from missing count, not raw bool."""
+    raw = _timing_base()
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 2
+    raw["timing_incomplete"] = False  # raw says False but missing > 0
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    assert result["timing_missing_jobs"] == 2
+    assert result["timing_incomplete"] is True  # derived, not raw
+
+
+def test_timing_malicious_extras_stripped():
+    """Extra raw fields in new duration dicts are stripped by _safe_duration."""
+    raw = _timing_base()
+    raw["job_execution_duration"] = {
+        "sample_count": 1,
+        "median_seconds": 30.0,
+        "average_seconds": 30.0,
+        "evil_field": "malicious",
+        "another_extra": 999,
+    }
+    raw["between_job_gaps"] = {
+        "sample_count": 1,
+        "median_seconds": 100.0,
+        "average_seconds": 100.0,
+        "injected": True,
+    }
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 0
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    # Only allowlisted keys present
+    assert set(result["job_execution_duration"].keys()) == {"sample_count", "median_seconds", "average_seconds"}
+    assert set(result["between_job_gaps"].keys()) == {"sample_count", "median_seconds", "average_seconds"}
+    assert "evil_field" not in result["job_execution_duration"]
+    assert "injected" not in result["between_job_gaps"]
+
+
+def test_timing_sample_count_exceeds_duration_sample_count():
+    """New duration sample_count > existing duration.sample_count => None."""
+    raw = _timing_base()
+    raw["duration"] = {
+        "sample_count": 1,
+        "median_seconds": 130.0,
+        "average_seconds": 130.0,
+    }
+    raw["job_execution_duration"] = {
+        "sample_count": 5,  # exceeds duration sample_count of 1
+        "median_seconds": 30.0,
+        "average_seconds": 30.0,
+    }
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 0
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    assert result["duration"]["sample_count"] == 1
+    assert result["job_execution_duration"] is None  # rejected
+
+
+def test_timing_sample_count_exceeds_assessed():
+    """New duration sample_count > assessed (s+f) => None."""
+    raw = _timing_base()
+    raw["duration"] = {
+        "sample_count": 10,
+        "median_seconds": 130.0,
+        "average_seconds": 130.0,
+    }
+    raw["job_execution_duration"] = {
+        "sample_count": 5,  # exceeds assessed = 1 + 0 = 1
+        "median_seconds": 30.0,
+        "average_seconds": 30.0,
+    }
+    raw["timing_observed_jobs"] = 1
+    raw["timing_missing_jobs"] = 0
+
+    result = _safe_recent_workflow_reliability(raw)
+
+    assert result is not None
+    assert result["job_execution_duration"] is None  # exceeds assessed

@@ -802,6 +802,29 @@ function renderRecentWorkflowReliability(data) {
   const samples = si(dur && dur.sample_count);
   const durStr = med !== null && samples !== null && samples > 0 && samples <= s + f
     ? `${med.toFixed(1)}s (${samples} samples)` : 'Not recorded';
+  const timingString = (stats) => {
+    if (!stats || typeof stats !== 'object') return 'Not recorded';
+    const m = sd(stats.median_seconds);
+    const a = sd(stats.average_seconds);
+    const sc = si(stats.sample_count);
+    if (m === null && a === null) return 'Not recorded';
+    if (sc === null || sc <= 0 || sc > s + f) return 'Not recorded';
+    const parts = [];
+    if (m !== null) parts.push(`median ${m.toFixed(1)}s`);
+    if (a !== null) parts.push(`avg ${a.toFixed(1)}s`);
+    parts.push(`${sc} samples`);
+    return parts.join(', ');
+  };
+  const jobExecStr = timingString(data.job_execution_duration);
+  const gapStr = timingString(data.between_job_gaps);
+  const to = si(data.timing_observed_jobs);
+  const tmi2 = si(data.timing_missing_jobs);
+  let timingCoverage;
+  if (to === null || tmi2 === null) {
+    timingCoverage = 'Unavailable';
+  } else {
+    timingCoverage = `${to} valid job intervals / ${tmi2} missing or invalid intervals` + (tmi2 > 0 ? ' — Incomplete' : '');
+  }
   const tok = (data.tokens && typeof data.tokens === 'object') ? data.tokens : null;
   let tokStr;
   if (!tok) {
@@ -819,9 +842,13 @@ function renderRecentWorkflowReliability(data) {
   const metrics = [['Approved / merged / pushed', s], ['Failed outcomes', f], ['Active', a], ['Excluded', x]]
     .map(([l, v]) => `<article class="metric"><span>${l}</span><strong>${v}</strong></article>`)
     .join('');
+  const avg = sd(dur && dur.average_seconds);
+  const avgStr = avg !== null ? `, avg ${avg.toFixed(1)}s` : '';
   card.innerHTML = `<h2>Recent workflow reliability</h2>` +
-    `<p class="reliability-note">Latest ${sample} workflows (up to 20) · Success rate: ${rate} (${denom} assessed outcomes) · Median completion: ${durStr} · Recorded tokens: ${tokStr}</p>` +
+    `<p class="reliability-note">Latest ${sample} workflows (up to 20) · Success rate: ${rate} (${denom} assessed outcomes) · (End-to-end elapsed) Median completion: ${durStr}${avgStr} · Recorded tokens: ${tokStr}</p>` +
+    `<p class="reliability-note">Job execution time: ${jobExecStr} · Between-job gaps: ${gapStr} · Timing coverage: ${timingCoverage}</p>` +
     `<div class="reliability-grid">${metrics}</div>` +
     stageHtml(data.failure_stage_counts, 'Failed stages') + stageHtml(data.blocked_stage_counts, 'Blocked stages') +
-    '<p class="reliability-note">Active and excluded workflows are not in the success-rate denominator. Historical canaries are included.</p>';
+    '<p class="reliability-note">Active and excluded workflows are not in the success-rate denominator. Historical canaries are included.</p>' +
+    '<p class="reliability-note">Execution time is recorded job wall time, not GPU-only compute. Gaps exclude initial queue wait; timestamps do not identify cause.</p>';
 }

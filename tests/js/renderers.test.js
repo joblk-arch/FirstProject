@@ -897,5 +897,68 @@ check('no new setInterval in render or load wiring', () => {
   assert(!loadSrc.includes('setInterval'), 'load must not contain setInterval');
 });
 
+check('Timing breakdown: distinct elapsed, execution and gaps with coverage', () => {
+  const data = recentFixture();
+  data.duration = {sample_count: 3, median_seconds: 130, average_seconds: 140};
+  data.job_execution_duration = {sample_count: 3, median_seconds: 30, average_seconds: 40};
+  data.between_job_gaps = {sample_count: 3, median_seconds: 100, average_seconds: 100};
+  data.timing_observed_jobs = 6;
+  data.timing_missing_jobs = 1;
+  data.timing_incomplete = false;
+  const html = recentHtml(data);
+  for (const expected of ['(End-to-end elapsed) Median completion: 130.0s (3 samples), avg 140.0s',
+    'Job execution time: median 30.0s, avg 40.0s, 3 samples',
+    'Between-job gaps: median 100.0s, avg 100.0s, 3 samples',
+    '6 valid job intervals / 1 missing or invalid intervals — Incomplete',
+    'not GPU-only compute', 'Gaps exclude initial queue wait', 'timestamps do not identify cause']) {
+    assert(html.includes(expected), `${expected} absent: ${html}`);
+  }
+});
+check('Timing breakdown: recorded zero gap is not missing', () => {
+  const data = recentFixture();
+  data.job_execution_duration = {sample_count: 3, median_seconds: 30, average_seconds: 30};
+  data.between_job_gaps = {sample_count: 3, median_seconds: 0, average_seconds: 0};
+  const html = recentHtml(data);
+  assert(html.includes('Between-job gaps: median 0.0s, avg 0.0s, 3 samples'), html);
+});
+check('Timing breakdown: legacy fields missing preserve existing metrics', () => {
+  const html = recentHtml(recentFixture());
+  for (const expected of ['Job execution time: Not recorded', 'Between-job gaps: Not recorded',
+    'Timing coverage: Unavailable', '66.7%', 'Recorded tokens: 100']) assert(html.includes(expected), html);
+});
+check('Timing breakdown: zero samples and invalid durations are not recorded', () => {
+  for (const stats of [
+    {sample_count: 0, median_seconds: 0, average_seconds: 0},
+    {sample_count: true, median_seconds: 1, average_seconds: 1},
+    {sample_count: 4, median_seconds: 1, average_seconds: 1},
+    {sample_count: 3, median_seconds: NaN, average_seconds: Infinity},
+    {sample_count: 3, median_seconds: -1, average_seconds: -2},
+    {sample_count: 3, median_seconds: Number.MAX_VALUE, average_seconds: Number.MAX_VALUE},
+    {sample_count: 3, median_seconds: '<img src=x onerror=bad()>', average_seconds: true},
+  ]) {
+    const data = recentFixture();
+    data.job_execution_duration = stats;
+    data.between_job_gaps = stats;
+    const html = recentHtml(data);
+    assert(html.includes('Job execution time: Not recorded'), html);
+    assert(html.includes('Between-job gaps: Not recorded'), html);
+    assert(!html.includes('<img') && !html.includes('onerror'), html);
+  }
+});
+check('Timing breakdown: missing counts stay unavailable; actual zero coverage stays zero', () => {
+  const data = recentFixture();
+  data.timing_observed_jobs = 0;
+  data.timing_missing_jobs = 0;
+  data.timing_incomplete = true;
+  let html = recentHtml(data);
+  assert(html.includes('Timing coverage: 0 valid job intervals / 0 missing or invalid intervals'), html);
+  assert(!html.includes('0 missing or invalid intervals — Incomplete'), html);
+  for (const invalid of [null, true, -1, 1.5]) {
+    data.timing_missing_jobs = invalid;
+    html = recentHtml(data);
+    assert(html.includes('Timing coverage: Unavailable'), html);
+  }
+});
+
 console.log(`\n${passed}/${total} checks passed`);
 process.exit(0);
