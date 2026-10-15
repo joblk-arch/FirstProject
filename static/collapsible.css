@@ -1,0 +1,88 @@
+/* Scoped styles for the dashboard's native <details> collapsible sections.
+   Small and readable on purpose; does not touch the existing minified CSS.
+   Uses the existing design tokens from styles.css (:root variables). */
+
+/* --- Collapsible panels (System status, UPS, Work distribution, Token ledger, Start build) --- */
+
+details.panel > summary.panel-head {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 0;
+}
+
+/* Hide the default disclosure triangle; we draw our own chevron. */
+details.panel > summary.panel-head::-webkit-details-marker { display: none; }
+
+/* Chevron indicator that flips with the open state. */
+details.panel > summary.panel-head::before {
+  content: "";
+  flex: none;
+  width: 0.5em;
+  height: 0.5em;
+  border-right: 2px solid var(--teal, #5eead4);
+  border-bottom: 2px solid var(--teal, #5eead4);
+  transform: rotate(-45deg); /* points right when collapsed */
+  transition: transform 120ms ease;
+}
+details.panel[open] > summary.panel-head::before { transform: rotate(45deg); } /* points down when open */
+
+/* Push the trailing hint to the right edge of the summary row. */
+details.panel > summary.panel-head .hint { margin-left: auto; }
+
+/* Open: separate the header from the body. */
+details.panel[open] > summary.panel-head { margin-bottom: 16px; }
+
+/* Collapsed: compact header, no empty-height gap in the grid. */
+details.panel:not([open]) { padding: 0; align-self: start; }
+details.panel:not([open]) > summary.panel-head { padding: 14px 20px; }
+
+/* Visible keyboard focus (native Enter/Space toggling on the summary). */
+details.panel > summary.panel-head:focus-visible {
+  outline: 2px solid var(--teal, #5eead4);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* --- Reliability and diagnostics wrapper (groups the four sub-cards) --- */
+
+details.reliability-section { margin-bottom: 12px; }
+
+details.reliability-section > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 2px;
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--text, #eef6f8);
+}
+details.reliability-section > summary::-webkit-details-marker { display: none; }
+details.reliability-section > summary::before {
+  content: "";
+  flex: none;
+  width: 0.5em;
+  height: 0.5em;
+  border-right: 2px solid var(--teal, #5eead4);
+  border-bottom: 2px solid var(--teal, #5eead4);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+details.reliability-section[open] > summary::before { transform: rotate(45deg); }
+details.reliability-section[open] > summary { margin-bottom: 12px; }
+details.reliability-section > summary:focus-visible {
+  outline: 2px solid var(--teal, #5eead4);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Narrow screens: keep summaries tappable and unwrapped. */
+@media (max-width: 720px) {
+  details.panel > summary.panel-head,
+  details.reliability-section > summary { gap: 8px; }
+  details.panel:not([open]) > summary.panel-head { padding: 12px 16px; }
+}

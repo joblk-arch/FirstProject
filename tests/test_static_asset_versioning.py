@@ -26,6 +26,8 @@ def _make_static_dir(tmp_path: Path, app_js: str = "console.log('app');",
     static.mkdir()
     (static / "app.js").write_text(app_js, encoding="utf-8")
     (static / "styles.css").write_text(styles_css, encoding="utf-8")
+    (static / "dashboard-collapsible.js").write_text("console.log('collapsible');\n", encoding="utf-8")
+    (static / "collapsible.css").write_text("body{color:blue}\n", encoding="utf-8")
 
     if index_html is None:
         index_html = (
@@ -208,6 +210,8 @@ def test_missing_html_file_failure(tmp_path):
     static.mkdir()
     (static / "app.js").write_text("x", encoding="utf-8")
     (static / "styles.css").write_text("y", encoding="utf-8")
+    (static / "dashboard-collapsible.js").write_text("z", encoding="utf-8")
+    (static / "collapsible.css").write_text("w", encoding="utf-8")
     (static / "index.html").write_text('<html></html>', encoding="utf-8")
     # login.html is missing
 

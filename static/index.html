@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/efficiency.css?v=agent-efficiency-1">
   <link rel="stylesheet" href="/access.css">
   <link rel="stylesheet" href="/user-management.css">
+  <link rel="stylesheet" href="/collapsible.css">
 </head>
 <body>
   <header class="topbar">
@@ -22,13 +23,16 @@
       <button id="refresh" type="button">Refresh data</button>
     </section>
     <section class="metrics" id="metrics" aria-label="Key metrics"></section>
-    <section class="reliability-card" id="reliability-card" role="region" aria-label="All-time job status counts"></section>
-    <section class="reliability-card" id="recent-workflow-reliability" role="region" aria-label="Recent workflow reliability"><p class="reliability-note">Unavailable</p></section>
-    <section class="reliability-card" id="workflow-bottlenecks" role="region" aria-label="Workflow bottlenecks"><p class="reliability-note">Unavailable</p></section>
-    <section class="reliability-card" id="completion-recovery" role="region" aria-label="Completion recovery"><p class="reliability-note">Unavailable</p></section>
+    <details class="reliability-section" id="reliability-section">
+      <summary>Reliability and diagnostics</summary>
+      <section class="reliability-card" id="reliability-card" role="region" aria-label="All-time job status counts"></section>
+      <section class="reliability-card" id="recent-workflow-reliability" role="region" aria-label="Recent workflow reliability"><p class="reliability-note">Unavailable</p></section>
+      <section class="reliability-card" id="workflow-bottlenecks" role="region" aria-label="Workflow bottlenecks"><p class="reliability-note">Unavailable</p></section>
+      <section class="reliability-card" id="completion-recovery" role="region" aria-label="Completion recovery"><p class="reliability-note">Unavailable</p></section>
+    </details>
     <div class="grid">
-      <section class="panel span-2" id="start-build-panel">
-        <div class="panel-head"><div><p class="eyebrow">START BUILD</p><h2>Launch a new workflow</h2></div><span class="hint" id="build-permission-hint"></span></div>
+      <details class="panel span-2" id="start-build-panel" open>
+        <summary class="panel-head"><div><p class="eyebrow">START BUILD</p><h2>Launch a new workflow</h2></div><span class="hint" id="build-permission-hint"></span></summary>
         <form id="start-build-form" novalidate>
           <div class="build-form-grid">
             <div class="build-field">
@@ -84,21 +88,21 @@
             <p id="build-status" class="build-status" role="status" aria-live="polite"></p>
           </div>
         </form>
-      </section>
-      <section class="panel span-2" id="cluster-health-panel" aria-labelledby="cluster-health-title">
-        <div class="panel-head">
+      </details>
+      <details class="panel span-2" id="cluster-health-panel" aria-labelledby="cluster-health-title">
+        <summary class="panel-head">
           <div><p class="eyebrow">CLUSTER HEALTH</p><h2 id="cluster-health-title">System status</h2></div>
           <span class="hint" id="health-timestamp"></span>
-        </div>
+        </summary>
         <div id="cluster-health" class="health-grid" role="status" aria-live="polite"></div>
-      </section>
-      <section class="panel span-2" id="ups-panel" aria-labelledby="ups-title">
-        <div class="panel-head">
+      </details>
+      <details class="panel span-2" id="ups-panel" aria-labelledby="ups-title">
+        <summary class="panel-head">
           <div><p class="eyebrow">UPS STATUS</p><h2 id="ups-title">Uninterruptible power</h2></div>
           <span class="hint" id="ups-timestamp"></span>
-        </div>
+        </summary>
         <div id="ups-status" class="ups-grid" role="status" aria-live="polite"></div>
-      </section>
+      </details>
       <section class="panel span-2" id="alerts-panel" aria-labelledby="alerts-title">
         <div class="panel-head"><div><p class="eyebrow">ALERTS</p><h2 id="alerts-title">Active alerts</h2></div><span class="hint" id="alerts-hint"></span></div>
         <div id="alerts" class="alerts-list" role="status" aria-live="polite"></div>
@@ -116,14 +120,14 @@
         <div class="panel-head"><div><p class="eyebrow">WORKFLOWS</p><h2>Recent workflows</h2></div><span class="hint">Newest first</span></div>
         <div class="table-wrap"><table><thead><tr><th>Project</th><th>Objective</th><th>Status</th><th>Repair</th><th>Origin</th><th>Models</th><th>Stages</th><th>Tokens (in/out/total)</th><th>Created</th></tr></thead><tbody id="workflows"></tbody></table></div>
       </section>
-      <section class="panel">
-        <div class="panel-head"><div><p class="eyebrow">PROJECTS</p><h2>Work distribution</h2></div></div>
+      <details class="panel" id="work-distribution-panel">
+        <summary class="panel-head"><div><p class="eyebrow">PROJECTS</p><h2>Work distribution</h2></div></summary>
         <div id="projects" class="stack"></div>
-      </section>
-      <section class="panel">
-        <div class="panel-head"><div><p class="eyebrow">MODELS</p><h2>Token ledger</h2></div><span class="hint">Recorded jobs</span></div>
+      </details>
+      <details class="panel" id="token-ledger-panel">
+        <summary class="panel-head"><div><p class="eyebrow">MODELS</p><h2>Token ledger</h2></div><span class="hint">Recorded jobs</span></summary>
         <div id="models" class="stack"></div>
-      </section>
+      </details>
     </div>
     <section class="panel span-2" id="user-management" hidden aria-labelledby="user-management-title">
       <div class="panel-head">
@@ -200,6 +204,7 @@
       </div>
     </div>
   </div>
+  <script src="/dashboard-collapsible.js" defer></script>
   <script src="/app.js?v=reliability-counts-3" defer></script>
   <script src="/user-management.js" defer></script>
 </body>
