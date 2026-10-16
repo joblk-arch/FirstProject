@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 # Known assets to version (relative to static dir)
-ASSETS = ("app.js", "styles.css", "dashboard-collapsible.js", "collapsible.css")
+ASSETS = ("app.js", "styles.css", "dashboard-collapsible.js", "collapsible.css", "user-management.js")
 
 # HTML files that reference these assets
 HTML_FILES = ("index.html", "login.html")

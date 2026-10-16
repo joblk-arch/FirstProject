@@ -19,6 +19,7 @@ def _sha256_short(data: bytes) -> str:
 
 def _make_static_dir(tmp_path: Path, app_js: str = "console.log('app');",
                      styles_css: str = "body{color:red}",
+                     user_mgmt_js: str = "console.log('user-management');\n",
                      index_html: str | None = None,
                      login_html: str | None = None) -> Path:
     """Create a minimal static directory with known content."""
@@ -28,6 +29,7 @@ def _make_static_dir(tmp_path: Path, app_js: str = "console.log('app');",
     (static / "styles.css").write_text(styles_css, encoding="utf-8")
     (static / "dashboard-collapsible.js").write_text("console.log('collapsible');\n", encoding="utf-8")
     (static / "collapsible.css").write_text("body{color:blue}\n", encoding="utf-8")
+    (static / "user-management.js").write_text(user_mgmt_js, encoding="utf-8")
 
     if index_html is None:
         index_html = (
@@ -35,6 +37,7 @@ def _make_static_dir(tmp_path: Path, app_js: str = "console.log('app');",
             '  <link rel="stylesheet" href="/styles.css">\n'
             '</head><body>\n'
             '  <script src="/app.js?v=reliability-counts-3" defer></script>\n'
+            '  <script src="/user-management.js" defer></script>\n'
             '</body></html>\n'
         )
     (static / "index.html").write_text(index_html, encoding="utf-8")
@@ -182,7 +185,7 @@ def test_rerun_idempotent(tmp_path):
 
     assert first == second
     # No double query strings
-    assert "?v=" not in first.replace("?v=", "", 1) or first.count("?v=") == first.count("?v=")
+    assert "??v=" not in first
     # Ensure no ?v=...&v=... pattern
     assert not re.search(r"\?v=[^\"']+&v=", first)
 
@@ -212,6 +215,7 @@ def test_missing_html_file_failure(tmp_path):
     (static / "styles.css").write_text("y", encoding="utf-8")
     (static / "dashboard-collapsible.js").write_text("z", encoding="utf-8")
     (static / "collapsible.css").write_text("w", encoding="utf-8")
+    (static / "user-management.js").write_text("u", encoding="utf-8")
     (static / "index.html").write_text('<html></html>', encoding="utf-8")
     # login.html is missing
 
@@ -333,3 +337,168 @@ def test_hash_length_at_least_12_hex(tmp_path):
     for h in hashes:
         assert len(h) >= 12
         assert all(c in "0123456789abcdef" for c in h)
+
+
+# ---------------------------------------------------------------------------
+# 13. user-management.js: exact content digest URL
+# ---------------------------------------------------------------------------
+
+def test_user_management_exact_content_digest_url(tmp_path):
+    """The ?v= value for user-management.js must equal the SHA256 short hash of its content."""
+    user_mgmt_js = "console.log('user-mgmt');\n"
+    static = _make_static_dir(tmp_path, user_mgmt_js=user_mgmt_js)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    expected_hash = _sha256_short(user_mgmt_js.encode())
+    assert f"/user-management.js?v={expected_hash}" in index
+
+
+# ---------------------------------------------------------------------------
+# 14. user-management.js: replacing preexisting query
+# ---------------------------------------------------------------------------
+
+def test_user_management_replacing_preexisting_query(tmp_path):
+    """A preexisting ?v=stale-123 on user-management.js is replaced with the content hash."""
+    user_mgmt_js = "console.log('um');\n"
+    index_html = (
+        '<html><head>\n'
+        '  <link rel="stylesheet" href="/styles.css">\n'
+        '</head><body>\n'
+        '  <script src="/app.js" defer></script>\n'
+        '  <script src="/user-management.js?v=stale-123" defer></script>\n'
+        '</body></html>\n'
+    )
+    static = _make_static_dir(tmp_path, user_mgmt_js=user_mgmt_js, index_html=index_html)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    assert "stale-123" not in index
+    expected_hash = _sha256_short(user_mgmt_js.encode())
+    assert f"/user-management.js?v={expected_hash}" in index
+
+
+# ---------------------------------------------------------------------------
+# 15. user-management.js: repeat build idempotent
+# ---------------------------------------------------------------------------
+
+def test_user_management_rerun_idempotent(tmp_path):
+    """Running the helper twice with user-management.js produces identical output."""
+    static = _make_static_dir(tmp_path)
+
+    vsa.version_static_assets(static)
+    first = (static / "index.html").read_text()
+
+    vsa.version_static_assets(static)
+    second = (static / "index.html").read_text()
+
+    assert first == second
+    # No double query strings
+    assert "??v=" not in first
+    assert not re.search(r"\?v=[^\"']+&v=", first)
+
+
+# ---------------------------------------------------------------------------
+# 16. user-management.js: changed content changes its URL only
+# ---------------------------------------------------------------------------
+
+def test_user_management_changed_content_changes_url_only(tmp_path):
+    """Modifying user-management.js changes only its URL; app/styles/collapse URLs unaffected."""
+    user_mgmt_v1 = "console.log('um-v1');\n"
+    app_js = "console.log('app');\n"
+    styles_css = "body{color:red}\n"
+    static = _make_static_dir(tmp_path, app_js=app_js, styles_css=styles_css, user_mgmt_js=user_mgmt_v1)
+
+    vsa.version_static_assets(static)
+    index_v1 = (static / "index.html").read_text()
+
+    app_hash = _sha256_short(app_js.encode())
+    css_hash = _sha256_short(styles_css.encode())
+    um_hash_v1 = _sha256_short(user_mgmt_v1.encode())
+
+    # Modify user-management.js
+    user_mgmt_v2 = "console.log('um-v2');\n"
+    (static / "user-management.js").write_text(user_mgmt_v2, encoding="utf-8")
+
+    vsa.version_static_assets(static)
+    index_v2 = (static / "index.html").read_text()
+
+    um_hash_v2 = _sha256_short(user_mgmt_v2.encode())
+    assert um_hash_v1 != um_hash_v2
+
+    # user-management.js URL changed
+    assert f"/user-management.js?v={um_hash_v1}" in index_v1
+    assert f"/user-management.js?v={um_hash_v2}" in index_v2
+    assert f"/user-management.js?v={um_hash_v1}" not in index_v2
+
+    # app.js URL unchanged
+    assert f"/app.js?v={app_hash}" in index_v1
+    assert f"/app.js?v={app_hash}" in index_v2
+
+    # styles.css URL unchanged
+    assert f"/styles.css?v={css_hash}" in index_v1
+    assert f"/styles.css?v={css_hash}" in index_v2
+
+
+# ---------------------------------------------------------------------------
+# 17. user-management.js: asset bytes not modified
+# ---------------------------------------------------------------------------
+
+def test_user_management_asset_bytes_not_modified(tmp_path):
+    """The helper does not modify user-management.js file content."""
+    user_mgmt_js = "console.log('original-um');\n"
+    static = _make_static_dir(tmp_path, user_mgmt_js=user_mgmt_js)
+
+    vsa.version_static_assets(static)
+
+    assert (static / "user-management.js").read_text() == user_mgmt_js
+
+
+# ---------------------------------------------------------------------------
+# 18. HTML without user-management.js reference doesn't gain one
+# ---------------------------------------------------------------------------
+
+def test_html_without_user_management_reference_untouched(tmp_path):
+    """If an HTML file doesn't reference user-management.js, the helper doesn't add a reference."""
+    user_mgmt_js = "console.log('um');\n"
+    index_html = (
+        '<html><head>\n'
+        '  <link rel="stylesheet" href="/styles.css">\n'
+        '</head><body>\n'
+        '  <script src="/app.js" defer></script>\n'
+        '</body></html>\n'
+    )
+    static = _make_static_dir(tmp_path, user_mgmt_js=user_mgmt_js, index_html=index_html)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    assert "user-management.js" not in index
+
+
+# ---------------------------------------------------------------------------
+# 19. Unknown asset references still untouched
+# ---------------------------------------------------------------------------
+
+def test_unknown_asset_references_still_untouched(tmp_path):
+    """References to assets not in the ASSETS tuple are left unchanged."""
+    index_html = (
+        '<html><head>\n'
+        '  <link rel="stylesheet" href="/styles.css">\n'
+        '  <link rel="stylesheet" href="/unknown-lib.css?v=keep-me">\n'
+        '</head><body>\n'
+        '  <script src="/app.js" defer></script>\n'
+        '  <script src="/user-management.js" defer></script>\n'
+        '  <script src="/some-other-lib.js?v=also-keep" defer></script>\n'
+        '</body></html>\n'
+    )
+    static = _make_static_dir(tmp_path, index_html=index_html)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    # Unknown references must be untouched
+    assert "/unknown-lib.css?v=keep-me" in index
+    assert "/some-other-lib.js?v=also-keep" in index
