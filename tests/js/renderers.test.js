@@ -1581,5 +1581,166 @@ check('Validation diagnostics: stable unique heading and actual details containm
   assert(loadSource.indexOf('renderValidationDiagnostics(null)') < loadSource.indexOf("if(error.message==='Session expired') return"));
 });
 
+// --- Workflow link button rendering in validation diagnostics ---
+check('valid workflow_id renders as button with data-workflow-id', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'abc123def4', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(html.includes('<button type="button" class="workflow-link"'), 'button with type and class');
+  assert(html.includes('data-workflow-id="abc123def4"'), 'data-workflow-id attribute');
+  assert(html.includes('aria-label='), 'aria-label present');
+});
+
+check('uppercase workflow_id renders plain label, no data attribute', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'ABC123DEF4', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for uppercase');
+  assert(!html.includes('<button'), 'no button for uppercase');
+  assert(html.includes('Build'), 'label still rendered as text');
+});
+
+check('partial workflow_id (9 chars) renders plain label', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'abc123def', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for partial');
+  assert(!html.includes('<button'), 'no button for partial');
+});
+
+check('over-length workflow_id (11 chars) renders plain label', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'abc123def45', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for over-length');
+  assert(!html.includes('<button'), 'no button for over-length');
+});
+
+check('non-hex workflow_id renders plain label', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'zzz123def4', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for non-hex');
+  assert(!html.includes('<button'), 'no button for non-hex');
+});
+
+check('HTML-injected workflow_id renders plain label, no data attribute', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'<img src=x onerror=alert(1)>', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for injected');
+  assert(!html.includes('<button'), 'no button for injected');
+  assert(!html.includes('<img'), 'no raw HTML injection');
+});
+
+check('missing workflow_id renders plain label', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for missing');
+  assert(!html.includes('<button'), 'no button for missing');
+  assert(html.includes('Build'), 'label rendered as text');
+});
+
+check('null workflow_id renders plain label', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:null, requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for null');
+  assert(!html.includes('<button'), 'no button for null');
+});
+
+check('label with HTML is escaped in button text', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'<img src=x onerror=alert(1)>', workflow_id:'abc123def4', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(html.includes('<button'), 'button rendered for valid id');
+  assert(!html.includes('<img'), 'no raw HTML in button text');
+  assert(html.includes('&lt;img'), 'label is escaped');
+});
+
+check('aria-label contains escaped label and workflow id', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'implementer', stage:'Build', workflow_id:'abc123def4', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(html.includes('aria-label="Build (workflow abc123def4)"'), 'aria-label has label and id');
+});
+
+check('standalone role is filtered out (not rendered at all)', () => {
+  const { renderValidationDiagnostics: vdFn } = context;
+  $('validation-diagnostics-body').innerHTML = '';
+  vdFn([{role:'standalone', stage:'Build', workflow_id:'abc123def4', requests:1, executions:1, last_outcome:'passed', recovery:'none'}]);
+  const html = $('validation-diagnostics-body').innerHTML;
+  assert(!html.includes('<button'), 'standalone role does not get button');
+  assert(!html.includes('data-workflow-id'), 'no data-workflow-id for standalone');
+  assert(!html.includes('Build'), 'standalone role row not rendered');
+});
+
+check('validation workflow links: actual stable-root registration and nested click', () => {
+  const handlerSource = extractFunction(source, 'handleValidationWorkflowClick');
+  assert(handlerSource, 'actual production handler is required');
+  const binding = source.match(/^\$\('validation-diagnostics'\)\.addEventListener\('click', handleValidationWorkflowClick\);$/m);
+  assert(binding, 'binding must be on the diagnostics ancestor, not jobs/workflows');
+  assert.strictEqual(source.match(/addEventListener\('click', handleValidationWorkflowClick\)/g).length, 1);
+  const listeners = [];
+  const opened = [];
+  const root = {
+    addEventListener(type, callback) {
+      assert.strictEqual(type, 'click');
+      listeners.push(callback);
+    },
+    contains(node) { return node.parentRoot === root; },
+  };
+  const body = {innerHTML:''};
+  const testContext = {
+    $: id => {
+      if (id === 'validation-diagnostics') return root;
+      if (id === 'validation-diagnostics-body') return body;
+      throw new Error('Unexpected DOM lookup: ' + id);
+    },
+    safe, openWorkflow: id => opened.push(id),
+  };
+  vm.createContext(testContext);
+  vm.runInContext(handlerSource + '\n' + extractFunction(source, 'renderValidationDiagnostics') + '\n' + binding[0], testContext);
+  assert.strictEqual(listeners.length, 1);
+  const job = {role:'implementer',stage:'Build',workflow_id:'abc123def4'};
+  testContext.renderValidationDiagnostics([job]);
+  assert(body.innerHTML.includes('data-workflow-id="abc123def4"'));
+  assert(body.innerHTML.includes('type="button"'));
+  const button = {dataset:{workflowId:'abc123def4'},parentRoot:root};
+  const nested = {closest(selector) {
+    assert.strictEqual(selector, 'button.workflow-link[data-workflow-id]');
+    return button;
+  }};
+  const click = target => listeners[0]({target,currentTarget:root});
+  click(nested);
+  assert.deepStrictEqual(opened, ['abc123def4']);
+  testContext.renderValidationDiagnostics([job]);
+  testContext.renderValidationDiagnostics([job]);
+  assert.strictEqual(listeners.length, 1, 'refresh must not register extra listeners');
+  click(nested);
+  assert.deepStrictEqual(opened, ['abc123def4','abc123def4']);
+  click({closest:() => null});
+  click(null);
+  click({});
+  const outside = {dataset:{workflowId:'abc123def4'},parentRoot:{}};
+  click({closest:() => outside});
+  for (const id of [null,42,'ABC123DEF4','abc123def','abc123def45','"><script>']) {
+    button.dataset.workflowId = id;
+    click(nested);
+  }
+  assert.strictEqual(opened.length, 2, 'nonworkflow, outside and invalid targets must not open');
+});
+
 console.log(`\n${passed}/${total} checks passed`);
 process.exit(0);

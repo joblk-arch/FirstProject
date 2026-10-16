@@ -687,6 +687,7 @@ $('logout').addEventListener('click', logout);
 $('jobs').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 $('workflows').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
 $('cluster-health').addEventListener('click',(event)=>{const trigger=event.target.closest('[data-workflow-id]');if(trigger)openWorkflow(trigger.dataset.workflowId);});
+$('validation-diagnostics').addEventListener('click', handleValidationWorkflowClick);
 workflowContent.addEventListener('click',(event)=>{const retry=event.target.closest('[data-retry-id]');if(retry)openWorkflow(retry.dataset.retryId);const action=event.target.closest('[data-workflow-action]');if(action)runWorkflowAction(action.dataset.workflowAction);});
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
@@ -1001,6 +1002,16 @@ function renderCompletionRecovery(data) {
   el.innerHTML = `${heading}${warning}<div class="reliability-grid">${rows}</div><p class="reliability-note">Only recorded completion continuations; workflow window excludes standalone. Missing historical telemetry is not zero. Counters are not proof of code correctness.</p>`;
 }
 
+function handleValidationWorkflowClick(event) {
+  const target = event.target;
+  const root = event.currentTarget;
+  const trigger = target && typeof target.closest === 'function'
+    ? target.closest('button.workflow-link[data-workflow-id]') : null;
+  if (!trigger || !root || !root.contains(trigger)) return;
+  const id = trigger.dataset.workflowId;
+  if (typeof id === 'string' && /^[0-9a-f]{10}$/.test(id)) openWorkflow(id);
+}
+
 function renderValidationDiagnostics(jobs) {
   const el = $('validation-diagnostics-body');
   if (!el) return;
@@ -1024,6 +1035,7 @@ function renderValidationDiagnostics(jobs) {
   const RECOVERY_LABELS = {not_attempted:'Not attempted',failed:'Failed',recovered:'Recovered'};
   function esc(v) { return safe(v); }
   function isSafeInt(v) { return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 1000000; }
+  const WF_ID_RE = /^[0-9a-f]{10}$/;
   const eligible = jobs.filter(j => j && typeof j === 'object' &&
     (j.role === 'implementer' || j.role === 'tester'));
   if (!eligible.length) {
@@ -1065,7 +1077,12 @@ function renderValidationDiagnostics(jobs) {
     if (role === 'tester') recText = 'Not applicable';
     else if (recState === null) recText = 'Not recorded';
     else recText = RECOVERY_LABELS[recState] || 'Not recorded';
-    return `<tr><td>${esc(label)}</td><td>${esc(reqText)}</td><td>${esc(exeText)}</td><td>${esc(outcomeText)}</td><td>${esc(recText)}</td></tr>`;
+    const wfId = typeof j.workflow_id === 'string' ? j.workflow_id : '';
+    const wfValid = WF_ID_RE.test(wfId);
+    const labelHtml = wfValid
+      ? `<button type="button" class="workflow-link" data-workflow-id="${esc(wfId)}" aria-label="${esc(label)} (workflow ${esc(wfId)})">${esc(label)}</button>`
+      : esc(label);
+    return `<tr><td>${labelHtml}</td><td>${esc(reqText)}</td><td>${esc(exeText)}</td><td>${esc(outcomeText)}</td><td>${esc(recText)}</td></tr>`;
   }).join('');
   const note = 'Sandbox executions are not proof that tests passed. Historical data may not be recorded.';
   el.innerHTML = heading + `<table class="reliability-table"><thead><tr><th>Stage/project</th><th>Requests</th><th>Executions</th><th>Last outcome</th><th>Validation recovery</th></tr></thead><tbody>${rows}</tbody></table><p class="reliability-note">${esc(note)}</p>`;
