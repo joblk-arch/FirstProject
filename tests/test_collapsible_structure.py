@@ -179,3 +179,20 @@ def test_four_new_summary_hints_in_actual_html():
                                   if n['tag'] in interactive_tags and first_child in n['parents']]
         assert not interactive_in_summary, \
             f'{wrapper_id} summary contains interactive controls: {[n["tag"] for n in interactive_in_summary]}'
+
+
+def test_health_summary_hints_stay_in_visible_headers():
+    page = Structure((Path(__file__).resolve().parents[1] / 'static/index.html').read_text())
+    mapping = {'system-health-hint': 'cluster-health-panel', 'ups-summary-hint': 'ups-panel',
+               'reliability-summary-hint': 'reliability-section', 'accounts-summary-hint': 'user-management'}
+    for hint_id, panel_id in mapping.items():
+        hints = [n for n in page.nodes if n['attrs'].get('id') == hint_id]
+        panels = [n for n in page.nodes if n['attrs'].get('id') == panel_id]
+        assert len(hints) == len(panels) == 1
+        hint, panel = hints[0], panels[0]
+        assert hint['tag'] == 'span' and hint['attrs'].get('aria-live') == 'polite'
+        assert panel['children'][0]['tag'] == 'summary'
+        assert panel['children'][0] in hint['parents']
+        assert hint.get('text', '').strip() == ('Admin only · Unavailable' if panel_id == 'user-management' else 'Unavailable')
+        if panel_id == 'user-management':
+            assert 'hidden' in panel['attrs']

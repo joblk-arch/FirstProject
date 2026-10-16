@@ -24,7 +24,7 @@
     </section>
     <section class="metrics" id="metrics" aria-label="Key metrics"></section>
     <details class="reliability-section" id="reliability-section">
-      <summary>Reliability and diagnostics</summary>
+      <summary>Reliability and diagnostics <span class="hint" id="reliability-summary-hint" aria-live="polite">Unavailable</span></summary>
       <section class="panel" id="validation-diagnostics" aria-labelledby="validation-diagnostics-title">
         <h3 id="validation-diagnostics-title">Validation diagnostics</h3>
         <div id="validation-diagnostics-body"></div>
@@ -96,14 +96,14 @@
       <details class="panel span-2" id="cluster-health-panel" aria-labelledby="cluster-health-title">
         <summary class="panel-head">
           <div><p class="eyebrow">CLUSTER HEALTH</p><h2 id="cluster-health-title">System status</h2></div>
-          <span class="hint" id="health-timestamp"></span>
+          <span class="hint" id="health-timestamp"></span><span class="hint" id="system-health-hint" aria-live="polite">Unavailable</span>
         </summary>
         <div id="cluster-health" class="health-grid" role="status" aria-live="polite"></div>
       </details>
       <details class="panel span-2" id="ups-panel" aria-labelledby="ups-title">
         <summary class="panel-head">
           <div><p class="eyebrow">UPS STATUS</p><h2 id="ups-title">Uninterruptible power</h2></div>
-          <span class="hint" id="ups-timestamp"></span>
+          <span class="hint" id="ups-timestamp"></span><span class="hint" id="ups-summary-hint" aria-live="polite">Unavailable</span>
         </summary>
         <div id="ups-status" class="ups-grid" role="status" aria-live="polite"></div>
       </details>
@@ -140,7 +140,7 @@
     <details class="panel span-2" id="user-management" hidden aria-labelledby="user-management-title">
       <summary class="panel-head">
         <div><p class="eyebrow">USER MANAGEMENT</p><h2 id="user-management-title">Accounts</h2></div>
-        <span class="hint">Admin only</span>
+        <span class="hint" id="accounts-summary-hint" aria-live="polite">Admin only · Unavailable</span>
       </summary>
       <form id="user-create-form" class="user-create-form" novalidate>
         <div class="user-create-grid">

@@ -238,6 +238,16 @@ function renderUpsStatus(data) {
   const luDisplay = fmtTime(lastUpdated);
   const evDisplay = lastEvent ? safe(lastEvent) : '';
   const evRow = lastEvent ? `<div class="ups-field ups-event"><span class="ups-label">Last event</span><span class="ups-value">${evDisplay}</span></div>` : '';
+  const upsHint = $('ups-summary-hint');
+  if (upsHint) {
+    if (status === 'healthy' && battery !== null) {
+      upsHint.textContent = `Utility power · Battery ${battery}%`;
+    } else if (status === 'warning' && battery !== null) {
+      upsHint.textContent = `On battery · Battery ${battery}%`;
+    } else {
+      upsHint.textContent = statusLabel;
+    }
+  }
   grid.innerHTML =
     `<div class="ups-badge ${status}">${safe(statusLabel)}</div>` +
     `<div class="ups-source ${hClass}">Source: ${safe(hLabel)}</div>` +
@@ -589,7 +599,7 @@ $('build-project').addEventListener('change', () => { loadTemplates($('build-pro
 async function loadClusterHealth() {
   try {
     const response = await fetch('/api/cluster-health', {cache: 'no-store'});
-    if (_handle401(response)) return;
+    if (response.status === 401) { renderClusterHealthError(); _handle401(response); return; }
     if (!response.ok) throw new Error(`Health check returned ${response.status}`);
     renderClusterHealth(await response.json());
   } catch (error) {
@@ -603,6 +613,17 @@ function renderClusterHealth(data) {
   const overall = data.overall || 'unknown';
   const timestamp = data.generated_at ? new Date(data.generated_at).toLocaleTimeString() : '';
   $('health-timestamp').textContent = timestamp ? `Checked ${timestamp}` : '';
+
+  const healthHint = $('system-health-hint');
+  if (healthHint) {
+    const problem = value => ['degraded', 'offline', 'error'].includes(value);
+    const services = Array.isArray(data.services) ? data.services : [];
+    const statuses = services.map(svc => svc && typeof svc === 'object' && !Array.isArray(svc) ? svc.status : null);
+    const lmStatus = data.lm_studio && !Array.isArray(data.lm_studio) ? data.lm_studio.status : null;
+    const supported = statuses.length > 0 && statuses.every(value => value === 'healthy') && lmStatus === 'healthy';
+    healthHint.textContent = problem(overall) || statuses.some(problem) || problem(lmStatus)
+      ? 'Needs attention' : overall === 'healthy' && supported ? 'Healthy' : 'Unavailable';
+  }
 
   const services = Array.isArray(data.services) ? data.services : [];
   const lmStudio = data.lm_studio || {};
@@ -666,6 +687,8 @@ function renderClusterHealthError() {
   const container = $('cluster-health');
   if (!container) return;
   $('health-timestamp').textContent = '';
+  const healthHint = $('system-health-hint');
+  if (healthHint) healthHint.textContent = 'Unavailable';
   container.innerHTML = `<div class="health-overall status offline"><span>unavailable</span></div><p class="muted-copy">Health check could not be completed.</p>`;
   renderStatusCountsCard(null, null);
 }
@@ -712,7 +735,7 @@ function renderAgentActivity(counts) {
 async function loadUpsStatus() {
   try {
     const response = await fetch('/api/ups-status', { cache: 'no-store' });
-    if (_handle401(response)) return;
+    if (response.status === 401) { renderUpsStatus(null); _handle401(response); return; }
     if (!response.ok) { renderUpsStatus(null); return; }
     const data = await response.json();
     renderUpsStatus(data);
@@ -866,7 +889,9 @@ function renderRecentWorkflowReliability(data) {
   if (!card) return;
   const si = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0) ? v : null;
   const sd = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER) ? v : null;
-  const unavail = () => { card.innerHTML = '<h2>Recent workflow reliability</h2><p class="reliability-note">Unavailable</p>'; };
+  const relHint = $('reliability-summary-hint');
+  const setRelHint = (txt) => { if (relHint) relHint.textContent = txt; };
+  const unavail = () => { setRelHint('Unavailable'); card.innerHTML = '<h2>Recent workflow reliability</h2><p class="reliability-note">Unavailable</p>'; };
   if (!data || typeof data !== 'object') { unavail(); return; }
   const sample = si(data.sample_count);
   if (sample === null || sample > 20) { unavail(); return; }
@@ -879,9 +904,11 @@ function renderRecentWorkflowReliability(data) {
     return;
   }
   if (sample === 0) {
+    setRelHint('No recent workflows');
     card.innerHTML = '<h2>Recent workflow reliability</h2><p class="reliability-note">No recent workflows</p>';
     return;
   }
+  setRelHint(`Recent sample: ${f} failed · ${a} active`);
   const denom = s + f;
   const rate = denom === 0 ? 'Unavailable' : (s / denom * 100).toFixed(1) + '%';
   const KNOWN_STAGES = ['plan', 'implement', 'test', 'review', 'reason', 'unknown'];

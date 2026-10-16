@@ -180,20 +180,56 @@
       });
     }
 
+    function updateAccountsHint(users) {
+      var hint = document.getElementById("accounts-summary-hint");
+      if (!hint) return;
+      if (!Array.isArray(users)) {
+        hint.textContent = "Admin only \u00b7 Unavailable";
+        return;
+      }
+      var valid = users.every(function (u) {
+        return u !== null && typeof u === "object" && !Array.isArray(u) && typeof u.disabled === "boolean";
+      });
+      if (!valid) {
+        hint.textContent = "Admin only \u00b7 Unavailable";
+        return;
+      }
+      var disabled = users.filter(function (u) { return u.disabled === true; }).length;
+      hint.textContent = "Admin only \u00b7 " + users.length + " accounts \u00b7 " + disabled + " disabled";
+    }
+
     function loadUsers() {
       setError("");
       setStatus("Loading users…");
       apiFetch("/api/admin/users")
         .then(function (res) {
+          if (!res.ok) updateAccountsHint(null);
           if (!res.ok) throw new Error(safeError(res));
           return res.json();
         })
         .then(function (data) {
-          var users = Array.isArray(data.users) ? data.users : [];
+          var users = (data && typeof data === "object" && !Array.isArray(data) && Array.isArray(data.users)) ? data.users : null;
+          if (users === null) {
+            updateAccountsHint(null);
+            renderUsers([]);
+            setStatus("");
+            return;
+          }
+          var valid = users.every(function (u) {
+            return u !== null && typeof u === "object" && !Array.isArray(u) && typeof u.disabled === "boolean";
+          });
+          if (!valid) {
+            updateAccountsHint(null);
+            renderUsers([]);
+            setStatus("");
+            return;
+          }
+          updateAccountsHint(users);
           renderUsers(users);
           setStatus("");
         })
         .catch(function (err) {
+          updateAccountsHint(null);
           setError(err.message || safeMessage(500));
           setStatus("");
         });
