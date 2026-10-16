@@ -94,3 +94,88 @@ def test_recent_activity_heading_and_table_are_preserved():
     assert [n.get('text', '').strip() for n in page.nodes
             if n['tag'] == 'th' and tables[0] in n['parents']] == [
                 'Stage', 'Project', 'Status', 'Model', 'Tokens', 'Duration']
+
+
+def test_four_new_summary_hints_in_actual_html():
+    """Parse actual static/index.html and verify the four new-summary hint spans.
+
+    Maps each hint ID to its wrapper ID and asserts:
+    - Each ID occurs exactly once
+    - Is a span with class="hint" and aria-live="polite"
+    - Initial text is "Unavailable"
+    - Nested in the wrapper's direct first child summary (not collapsed body)
+    - Expected heading is preserved in the summary
+    - No interactive controls in the summary
+    """
+    page = Structure((Path(__file__).resolve().parents[1] / 'static/index.html').read_text())
+    assert not page.stack, 'HTML must be well-formed'
+
+    # Map hint IDs to their wrapper IDs
+    hint_to_wrapper = {
+        'recent-workflows-hint': 'recent-workflows-panel',
+        'recent-agent-activity-hint': 'recent-agent-activity-panel',
+        'work-distribution-hint': 'work-distribution-panel',
+        'token-ledger-hint': 'token-ledger-panel',
+    }
+
+    # Expected headings for each wrapper's summary
+    expected_headings = {
+        'recent-workflows-panel': 'Recent workflows',
+        'recent-agent-activity-panel': 'Recent agent activity',
+        'work-distribution-panel': 'Work distribution',
+        'token-ledger-panel': 'Token ledger',
+    }
+
+    all_ids = [n['attrs']['id'] for n in page.nodes if 'id' in n['attrs']]
+    by_id = {n['attrs']['id']: n for n in page.nodes if 'id' in n['attrs']}
+
+    for hint_id, wrapper_id in hint_to_wrapper.items():
+        # 1. Each hint ID occurs exactly once
+        count = all_ids.count(hint_id)
+        assert count == 1, f'{hint_id} occurs {count} times, expected exactly 1'
+
+        # 2. Each wrapper ID occurs exactly once
+        wrapper_count = all_ids.count(wrapper_id)
+        assert wrapper_count == 1, f'{wrapper_id} occurs {wrapper_count} times, expected exactly 1'
+
+        # 3. Hint is a span with class="hint" and aria-live="polite"
+        hint_node = by_id[hint_id]
+        assert hint_node['tag'] == 'span', f'{hint_id} must be a span, got {hint_node["tag"]}'
+        assert hint_node['attrs'].get('class') == 'hint', \
+            f'{hint_id} must have class="hint", got {hint_node["attrs"].get("class")!r}'
+        assert hint_node['attrs'].get('aria-live') == 'polite', \
+            f'{hint_id} must have aria-live="polite", got {hint_node["attrs"].get("aria-live")!r}'
+
+        # 4. Initial text is "Unavailable"
+        text = hint_node.get('text', '').strip()
+        assert text == 'Unavailable', \
+            f'{hint_id} initial text must be "Unavailable", got {text!r}'
+
+        # 5. Nested in wrapper's direct first child summary (not collapsed body)
+        wrapper_node = by_id[wrapper_id]
+        assert wrapper_node['tag'] == 'details', f'{wrapper_id} must be details'
+        assert len(wrapper_node['children']) >= 1, f'{wrapper_id} must have children'
+        first_child = wrapper_node['children'][0]
+        assert first_child['tag'] == 'summary', \
+            f'{wrapper_id} first child must be summary, got {first_child["tag"]}'
+        # The hint must be a descendant of the summary (direct first child of wrapper)
+        assert first_child in hint_node['parents'], \
+            f'{hint_id} must be nested in {wrapper_id}\'s summary (first child)'
+        # Ensure it's NOT in a collapsed-body div
+        for parent in hint_node['parents']:
+            assert not (parent['tag'] == 'div' and 'collapsed-body' in (parent['attrs'].get('class') or '')), \
+                f'{hint_id} must not be in a collapsed-body div'
+
+        # 6. Expected heading preserved in the summary
+        heading_text = [n.get('text', '').strip() for n in page.nodes
+                        if n['tag'] == 'h2' and first_child in n['parents']]
+        expected = expected_headings[wrapper_id]
+        assert expected in ' '.join(heading_text), \
+            f'{wrapper_id} summary must contain heading "{expected}", got {heading_text}'
+
+        # 7. No interactive controls in the summary
+        interactive_tags = {'button', 'input', 'select', 'textarea', 'a'}
+        interactive_in_summary = [n for n in page.nodes
+                                  if n['tag'] in interactive_tags and first_child in n['parents']]
+        assert not interactive_in_summary, \
+            f'{wrapper_id} summary contains interactive controls: {[n["tag"] for n in interactive_in_summary]}'

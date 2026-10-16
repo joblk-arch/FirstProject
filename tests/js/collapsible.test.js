@@ -306,7 +306,7 @@ check('recent activity: actual render preserves panel state, listener and storag
   // Execute production formatting helpers and the entire render function.
   // Unrelated child cards are stubbed; jobs rendering itself is not replaced.
   for (const name of ['renderRecentWorkflowReliability', 'renderWorkflowBottlenecks',
-    'renderCompletionRecovery', 'renderRunningNow', 'renderAgentActivity', 'renderValidationDiagnostics']) {
+    'renderCompletionRecovery', 'renderRunningNow', 'renderAgentActivity', 'renderValidationDiagnostics', 'renderSummaries']) {
     ctx[name] = () => {};
   }
   vm.runInContext(app.slice(0, app.indexOf('const dialog =')) + '\n' + render, ctx);

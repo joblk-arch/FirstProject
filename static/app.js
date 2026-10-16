@@ -41,7 +41,72 @@ function repairBadge(state, attempts, max) {
   return `<span class="${cls}" role="status" aria-label="${safe(label)}">${safe(label)}</span>`;
 }
 
+function renderSummaries(data) {
+  const wfHint = $('recent-workflows-hint');
+  const aaHint = $('recent-agent-activity-hint');
+  const wdHint = $('work-distribution-hint');
+  const tlHint = $('token-ledger-hint');
+  if (wfHint) {
+    if (!data || !Array.isArray(data.recent_workflows)) {
+      wfHint.textContent = 'Unavailable';
+    } else {
+      let valid = true;
+      let running = 0, attention = 0;
+      for (const w of data.recent_workflows) {
+        if (w === null || typeof w !== 'object' || Array.isArray(w) || typeof w.status !== 'string') { valid = false; break; }
+        if (w.status === 'running') running++;
+        else if (w.status === 'failed' || w.status === 'blocked') attention++;
+      }
+      wfHint.textContent = valid ? `Recent sample: ${running} running \u00b7 ${attention} need attention` : 'Unavailable';
+    }
+  }
+  if (aaHint) {
+    if (!data || !Array.isArray(data.counts)) {
+      aaHint.textContent = 'Unavailable';
+    } else {
+      let valid = true;
+      let running = 0, queued = 0;
+      for (const entry of data.counts) {
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) { valid = false; break; }
+        if (typeof entry.status !== 'string') { valid = false; break; }
+        if (typeof entry.count !== 'number' || typeof entry.count === 'boolean' || !Number.isSafeInteger(entry.count) || entry.count < 0) { valid = false; break; }
+        if (entry.status === 'running') running += entry.count;
+        else if (entry.status === 'queued') queued += entry.count;
+      }
+      if (valid && (!Number.isSafeInteger(running) || !Number.isSafeInteger(queued))) valid = false;
+      aaHint.textContent = valid ? `${running} running \u00b7 ${queued} queued` : 'Unavailable';
+    }
+  }
+  if (wdHint) {
+    if (!data || !Array.isArray(data.projects)) {
+      wdHint.textContent = 'Unavailable';
+    } else {
+      let valid = true;
+      for (const p of data.projects) {
+        if (p === null || typeof p !== 'object' || Array.isArray(p) || typeof p.name !== 'string') { valid = false; break; }
+      }
+      wdHint.textContent = valid ? `${data.projects.length} projects` : 'Unavailable';
+    }
+  }
+  if (tlHint) {
+    if (!data || !Array.isArray(data.usage)) {
+      tlHint.textContent = 'Unavailable';
+    } else {
+      let valid = true;
+      let total = 0;
+      for (const item of data.usage) {
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) { valid = false; break; }
+        if (typeof item.total_tokens !== 'number' || typeof item.total_tokens === 'boolean' || !Number.isSafeInteger(item.total_tokens) || item.total_tokens < 0) { valid = false; break; }
+        total += item.total_tokens;
+      }
+      if (valid && !Number.isSafeInteger(total)) valid = false;
+      tlHint.textContent = valid ? `${fmt(total)} recorded tokens` : 'Unavailable';
+    }
+  }
+}
+
 function render(data) {
+  renderSummaries(data);
   renderRecentWorkflowReliability(data.recent_workflow_reliability);
   renderWorkflowBottlenecks(data.workflow_bottlenecks);
   renderCompletionRecovery(data.completion_recovery_summary);
@@ -658,7 +723,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); renderAgentActivity(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { renderSummaries(null); renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); renderAgentActivity(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
