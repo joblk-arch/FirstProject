@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks', 'renderCompletionRecovery', 'renderValidationDiagnostics'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderAgentActivity', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks', 'renderCompletionRecovery', 'renderValidationDiagnostics'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -163,7 +163,7 @@ for (const name of REQUIRED) {
   }
 }
 
-const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow, renderUpsStatus, renderCompletionRecovery } = context;
+const { renderClusterHealth, renderStatusCountsCard, renderClusterHealthError, renderRunningNow, renderAgentActivity, renderUpsStatus, renderCompletionRecovery } = context;
 const $ = (id) => documentStub.getElementById(id);
 
 // --- Tiny check runner ---
@@ -1740,6 +1740,202 @@ check('validation workflow links: actual stable-root registration and nested cli
     click(nested);
   }
   assert.strictEqual(opened.length, 2, 'nonworkflow, outside and invalid targets must not open');
+});
+
+// --- renderAgentActivity tests ---
+
+check('renderAgentActivity: valid multi-project counts sums running and queued', () => {
+  renderAgentActivity([
+    {project: 'alpha', status: 'running', count: 3},
+    {project: 'alpha', status: 'queued', count: 2},
+    {project: 'beta', status: 'running', count: 1},
+    {project: 'beta', status: 'queued', count: 4},
+  ]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('>4<')); // 3+1 running
+  assert(el.innerHTML.includes('>6<')); // 2+4 queued
+  assert(el.innerHTML.includes('Occupied slots reflect running jobs; total worker capacity is not reported.'));
+});
+
+check('renderAgentActivity: empty counts shows zeros not Unavailable', () => {
+  renderAgentActivity([]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('>0<'));
+  assert(!el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: null counts shows Unavailable', () => {
+  renderAgentActivity(null);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: undefined counts shows Unavailable', () => {
+  renderAgentActivity(undefined);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: non-array object shows Unavailable', () => {
+  renderAgentActivity({running: 3});
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: string input shows Unavailable', () => {
+  renderAgentActivity('not an array');
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: negative count shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 'running', count: -1}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: boolean count shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 'running', count: true}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: string count shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 'running', count: '3'}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: fractional count shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 'running', count: 1.5}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: unsafe integer count shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 'running', count: Number.MAX_SAFE_INTEGER + 1}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: overflow sum shows Unavailable', () => {
+  renderAgentActivity([
+    {project: 'a', status: 'running', count: Number.MAX_SAFE_INTEGER},
+    {project: 'b', status: 'running', count: 1},
+  ]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: null entry in array shows Unavailable', () => {
+  renderAgentActivity([null]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: missing status field shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', count: 3}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: missing count field shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 'running'}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: non-string status shows Unavailable', () => {
+  renderAgentActivity([{project: 'a', status: 123, count: 3}]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: array entry shows Unavailable', () => {
+  renderAgentActivity([[1, 2, 3]]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('Unavailable'));
+});
+
+check('renderAgentActivity: unrelated statuses ignored in sum', () => {
+  renderAgentActivity([
+    {project: 'a', status: 'completed', count: 10},
+    {project: 'a', status: 'failed', count: 5},
+    {project: 'a', status: 'running', count: 2},
+    {project: 'a', status: 'queued', count: 1},
+  ]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('>2<')); // running
+  assert(el.innerHTML.includes('>1<')); // queued
+  // completed and failed should not appear as values
+  assert(!el.innerHTML.includes('>10<'));
+  assert(!el.innerHTML.includes('>5<'));
+});
+
+check('renderAgentActivity: running count greater than 2 not clamped', () => {
+  renderAgentActivity([
+    {project: 'a', status: 'running', count: 5},
+    {project: 'b', status: 'running', count: 3},
+  ]);
+  const el = $('agent-activity-body');
+  assert(el.innerHTML.includes('>8<')); // 5+3=8, not clamped to 2
+});
+
+check('renderAgentActivity: does not derive from recent jobs', () => {
+  const fnSource = extractFunction(source, 'renderAgentActivity');
+  assert(!fnSource.includes('data.jobs'));
+  assert(!fnSource.includes('recent_jobs'));
+  assert(!fnSource.includes('recent60sample'));
+});
+
+check('renderAgentActivity: stable unique heading in HTML', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../../static/index.html'), 'utf8');
+  assert(html.includes('id="agent-activity-title"'));
+  assert.strictEqual((html.match(/id="agent-activity-title"/g) || []).length, 1);
+  assert(html.includes('Agent activity summary'));
+});
+
+check('renderAgentActivity: render(data.counts) wiring in render function', () => {
+  const renderSource = extractFunction(source, 'render');
+  assert(renderSource.includes('renderAgentActivity(counts)'));
+});
+
+check('renderAgentActivity: load error clears before Session return', () => {
+  const loadSource = extractFunction(source, 'load');
+  assert(loadSource.indexOf('renderAgentActivity(null)') < loadSource.indexOf("if(error.message==='Session expired') return"));
+});
+
+check('renderAgentActivity: original Running now unchanged in render', () => {
+  const renderSource = extractFunction(source, 'render');
+  assert(renderSource.includes('renderRunningNow(jobs)'));
+});
+
+check('renderAgentActivity: HTML root near Running now and accessible', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../../static/index.html'), 'utf8');
+  const runningIdx = html.indexOf('id="running-now"');
+  const agentIdx = html.indexOf('id="agent-activity"');
+  assert(runningIdx > -1);
+  assert(agentIdx > -1);
+  assert(agentIdx > runningIdx);
+  assert(html.includes('aria-labelledby="agent-activity-title"'));
+  assert.strictEqual((html.match(/id="agent-activity"/g) || []).length, 1);
+  assert.strictEqual((html.match(/id="agent-activity-body"/g) || []).length, 1);
+});
+
+check('renderAgentActivity: no capacity hardcoding or clamping in source', () => {
+  const fnSource = extractFunction(source, 'renderAgentActivity');
+  assert(!fnSource.includes('Math.min'));
+  assert(!fnSource.includes('Math.max'));
+  assert(!/capacity\s*=\s*2/.test(fnSource));
+  assert(!/clamp/.test(fnSource));
+  assert(fnSource.includes('Occupied slots reflect running jobs; total worker capacity is not reported.'));
+});
+
+check('renderAgentActivity: no alert status text implying heartbeat proof', () => {
+  const fnSource = extractFunction(source, 'renderAgentActivity');
+  assert(!fnSource.includes('heartbeat'));
+  assert(!fnSource.includes('alive'));
+  assert(!fnSource.includes('healthy'));
 });
 
 console.log(`\n${passed}/${total} checks passed`);

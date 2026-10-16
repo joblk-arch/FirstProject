@@ -63,6 +63,7 @@ function render(data) {
     return `<tr><td>${stage}</td><td>${safe(job.project)}</td><td><span class="status ${safe(job.status)}">${safe(job.status)}</span></td><td>${modelWithReason(job.model, job.model_reason)}</td><td>${job.total_tokens == null ? '\u2014' : fmt(job.total_tokens)}</td><td>${duration(job.duration_seconds)}</td></tr>`;
   }).join('') : '<tr><td colspan="6" class="empty">No agent jobs yet.</td></tr>';
   renderRunningNow(jobs);
+  renderAgentActivity(counts);
   const byProject = Object.groupBy ? Object.groupBy(counts,(x) => x.project) : counts.reduce((all,x) => ((all[x.project] ??= []).push(x),all),{});
   $('projects').innerHTML = data.projects.map((project) => { const rows=byProject[project.name]||[]; const total=rows.reduce((n,x)=>n+x.count,0); const running=rows.filter((x)=>['running','queued'].includes(x.status)).reduce((n,x)=>n+x.count,0); const width=Math.min(100,total?Math.max(5,running/total*100):0); return `<div class="item"><div class="item-row"><strong>${safe(project.name)}</strong><span>${total} jobs</span></div><small>${safe(project.default_branch)} \u00b7 ${running} active</small><div class="bar"><i style="width:${width}%"></i></div></div>`; }).join('');
   $('models').innerHTML = usage.length ? usage.map((item) => `<div class="item"><div class="item-row"><strong>${safe((item.model||'Unknown').split('/').pop())}</strong><span>${fmt(item.total_tokens)}</span></div><small>${safe(item.project)} \u00b7 ${item.jobs} jobs \u00b7 ${fmt(item.prompt_tokens)} in / ${fmt(item.completion_tokens)} out</small></div>`).join('') : '<div class="empty">Token accounting begins with the next agent job.</div>';
@@ -620,6 +621,29 @@ function renderRunningNow(jobs) {
   }).join('');
 }
 
+function renderAgentActivity(counts) {
+  const root = $('agent-activity-body');
+  if (!root) return;
+  const unavailable = () => {
+    root.innerHTML = `<div class="health-card"><div class="health-card-head"><span class="status">Unavailable</span><span class="health-latency">Counts unavailable</span></div><p class="muted-copy">Occupied slots reflect running jobs; total worker capacity is not reported.</p></div>`;
+  };
+  if (counts === null || counts === undefined) { unavailable(); return; }
+  if (!Array.isArray(counts)) { unavailable(); return; }
+  for (const entry of counts) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) { unavailable(); return; }
+    if (typeof entry.status !== 'string') { unavailable(); return; }
+    if (typeof entry.count !== 'number' || !Number.isSafeInteger(entry.count) || entry.count < 0) { unavailable(); return; }
+  }
+  let running = 0, queued = 0;
+  for (const entry of counts) {
+    if (entry.status === 'running') running += entry.count;
+    else if (entry.status === 'queued') queued += entry.count;
+  }
+  if (!Number.isSafeInteger(running) || !Number.isSafeInteger(queued)) { unavailable(); return; }
+  const occupied = running;
+  root.innerHTML = `<div class="health-card"><div class="health-card-head"><span class="status running">${safe(String(running))}</span><span class="health-latency">Running agent jobs</span></div><div class="health-card-head"><span class="status queued">${safe(String(queued))}</span><span class="health-latency">Queued jobs</span></div><div class="health-card-head"><span class="status running">${safe(String(occupied))}</span><span class="health-latency">Occupied worker slots</span></div><p class="muted-copy">Occupied slots reflect running jobs; total worker capacity is not reported.</p></div>`;
+}
+
 async function loadUpsStatus() {
   try {
     const response = await fetch('/api/ups-status', { cache: 'no-store' });
@@ -634,7 +658,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); renderAgentActivity(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
