@@ -131,6 +131,7 @@ function standardElements() {
     'work-distribution-panel': makeDetailsEl('work-distribution-panel', false),
     'token-ledger-panel': makeDetailsEl('token-ledger-panel', false),
     'start-build-panel': makeDetailsEl('start-build-panel', true),
+    'recent-agent-activity-panel': makeDetailsEl('recent-agent-activity-panel', true),
   };
 }
 
@@ -146,6 +147,7 @@ check('defaults: all sections use their intended open/closed state when no stora
   assert.strictEqual(doc.getElementById('work-distribution-panel').open, false, 'work-distribution-panel should be collapsed by default');
   assert.strictEqual(doc.getElementById('token-ledger-panel').open, false, 'token-ledger-panel should be collapsed by default');
   assert.strictEqual(doc.getElementById('start-build-panel').open, true, 'start-build-panel should be open by default');
+  assert.strictEqual(doc.getElementById('recent-agent-activity-panel').open, true, 'recent-agent-activity-panel should be open by default');
 });
 
 // --- Test 2: Storage restoration ---
@@ -157,6 +159,7 @@ check('storage: saved open states are restored on init', () => {
     'work-distribution-panel': true,
     'token-ledger-panel': false,
     'start-build-panel': false,
+    'recent-agent-activity-panel': false,
   });
   const els = standardElements();
   const { ctx, doc } = buildContext({ storageValue: saved, elements: els });
@@ -168,6 +171,7 @@ check('storage: saved open states are restored on init', () => {
   assert.strictEqual(doc.getElementById('work-distribution-panel').open, true, 'work-distribution-panel should be restored open');
   assert.strictEqual(doc.getElementById('token-ledger-panel').open, false, 'token-ledger-panel should be restored closed');
   assert.strictEqual(doc.getElementById('start-build-panel').open, false, 'start-build-panel should be restored closed');
+  assert.strictEqual(doc.getElementById('recent-agent-activity-panel').open, false, 'recent-agent-activity-panel should be restored closed');
 });
 
 // --- Test 3: Invalid JSON in storage falls back to defaults ---
@@ -178,6 +182,7 @@ check('storage: invalid JSON falls back to defaults without throwing', () => {
 
   assert.strictEqual(doc.getElementById('reliability-section').open, false, 'should use default (closed)');
   assert.strictEqual(doc.getElementById('start-build-panel').open, true, 'should use default (open)');
+  assert.strictEqual(doc.getElementById('recent-agent-activity-panel').open, true, 'should use default (open)');
 });
 
 // --- Test 4: Throwing localStorage (Safari private mode) ---
@@ -188,6 +193,7 @@ check('storage: throwing localStorage is caught and defaults are used', () => {
 
   assert.strictEqual(doc.getElementById('reliability-section').open, false, 'should use default (closed)');
   assert.strictEqual(doc.getElementById('start-build-panel').open, true, 'should use default (open)');
+  assert.strictEqual(doc.getElementById('recent-agent-activity-panel').open, true, 'should use default (open)');
 });
 
 // --- Test 5: Partial/missing individual values use defaults ---
@@ -203,6 +209,7 @@ check('storage: missing individual keys use their defaults', () => {
   assert.strictEqual(doc.getElementById('reliability-section').open, true, 'saved value should be used');
   assert.strictEqual(doc.getElementById('cluster-health-panel').open, false, 'missing key should use default (closed)');
   assert.strictEqual(doc.getElementById('start-build-panel').open, true, 'missing key should use default (open)');
+  assert.strictEqual(doc.getElementById('recent-agent-activity-panel').open, true, 'missing key should use default (open)');
 });
 
 // --- Test 6: Non-boolean values in storage use defaults ---
@@ -211,6 +218,7 @@ check('storage: non-boolean values (strings, numbers, null) fall back to default
     'reliability-section': 'yes',
     'cluster-health-panel': 1,
     'start-build-panel': null,
+    'recent-agent-activity-panel': 'open',
   });
   const els = standardElements();
   const { ctx, doc } = buildContext({ storageValue: saved, elements: els });
@@ -219,6 +227,78 @@ check('storage: non-boolean values (strings, numbers, null) fall back to default
   assert.strictEqual(doc.getElementById('reliability-section').open, false, 'string "yes" should fall back to default (closed)');
   assert.strictEqual(doc.getElementById('cluster-health-panel').open, false, 'number 1 should fall back to default (closed)');
   assert.strictEqual(doc.getElementById('start-build-panel').open, true, 'null should fall back to default (open)');
+  assert.strictEqual(doc.getElementById('recent-agent-activity-panel').open, true, 'string "open" should fall back to default (open)');
+});
+
+check('recent activity: its own toggle persists false and reload restores it', () => {
+  const els = standardElements();
+  const { ctx, ls } = buildContext({ elements: els });
+  vm.runInContext(source, ctx);
+  const panel = els['recent-agent-activity-panel'];
+  assert.strictEqual(panel.listeners.toggle.length, 1);
+  panel.open = false;
+  panel.dispatchToggle();
+  const saved = ls.getItem('firstproject.dashboard.expansion.v1');
+  assert.strictEqual(JSON.parse(saved)['recent-agent-activity-panel'], false);
+  const fresh = standardElements();
+  assert.strictEqual(fresh['recent-agent-activity-panel'].open, true);
+  const reload = buildContext({ elements: fresh, storageValue: saved });
+  vm.runInContext(source, reload.ctx);
+  assert.strictEqual(fresh['recent-agent-activity-panel'].open, false);
+});
+
+check('recent activity: actual render preserves panel state, listener and storage', () => {
+  const els = standardElements();
+  const panel = els['recent-agent-activity-panel'];
+  for (const id of ['jobs', 'metrics', 'projects', 'models', 'workflows', 'updated', 'error']) {
+    els[id] = { id, innerHTML: '', textContent: '', hidden: false };
+  }
+  els.jobs.parentElement = panel;
+  const { ctx, ls, doc } = buildContext({ elements: els });
+  vm.runInContext(source, ctx);
+  const listeners = panel.listeners.toggle.slice();
+  let writes = 0;
+  const setItem = ls.setItem.bind(ls);
+  ls.setItem = (...args) => { writes++; setItem(...args); };
+  const harness = fs.readFileSync(path.join(__dirname, 'renderers.test.js'), 'utf8');
+  const start = harness.indexOf('function matchBrace(');
+  const end = harness.indexOf('// --- Extract the three renderers');
+  assert(start >= 0 && end > start);
+  const extract = vm.runInNewContext(harness.slice(start, end) + '\nextractFunction;');
+  const app = fs.readFileSync(path.join(projectRoot, 'static', 'app.js'), 'utf8');
+  const render = extract(app, 'render');
+  assert(render, 'actual dashboard render must exist');
+  // Execute production formatting helpers and the entire render function.
+  // Unrelated child cards are stubbed; jobs rendering itself is not replaced.
+  for (const name of ['renderRecentWorkflowReliability', 'renderWorkflowBottlenecks',
+    'renderCompletionRecovery', 'renderRunningNow', 'renderAgentActivity', 'renderValidationDiagnostics']) {
+    ctx[name] = () => {};
+  }
+  vm.runInContext(app.slice(0, app.indexOf('const dialog =')) + '\n' + render, ctx);
+  for (const opened of [false, true]) {
+    panel.open = opened;
+    panel.dispatchToggle();
+    const beforeWrites = writes;
+    const saved = ls.getItem('firstproject.dashboard.expansion.v1');
+    for (const status of ['running', 'completed']) {
+      ctx.render({ projects: [], jobs: [{ role: 'tester', project: 'firstproject', status,
+        workflow_id: 'abc123def4', total_tokens: 123, duration_seconds: 2 }],
+        generated_at: '2026-10-16T00:00:00Z' });
+      assert(els.jobs.innerHTML.includes(`status ${status}`), 'actual jobs output must change');
+      assert(els.jobs.innerHTML.includes('data-workflow-id="abc123def4"'));
+      assert.strictEqual(doc.getElementById('recent-agent-activity-panel'), panel);
+      assert.strictEqual(els.jobs.parentElement, panel);
+      assert.strictEqual(panel.open, opened);
+      assert.deepStrictEqual(panel.listeners.toggle, listeners);
+      assert.strictEqual(writes, beforeWrites, 'render must not persist preferences');
+      assert.strictEqual(ls.getItem('firstproject.dashboard.expansion.v1'), saved);
+    }
+  }
+  const before = writes;
+  panel.open = false;
+  panel.dispatchToggle();
+  assert.strictEqual(writes, before + 1, 'one listener remains after renders');
+  assert.strictEqual(JSON.parse(ls.getItem('firstproject.dashboard.expansion.v1'))[panel.id], false);
 });
 
 // --- Test 7: Toggle event saves state to storage ---

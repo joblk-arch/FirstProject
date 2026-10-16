@@ -19,11 +19,12 @@
     'ups-panel',
     'work-distribution-panel',
     'token-ledger-panel',
-    'start-build-panel'
+    'start-build-panel',
+    'recent-agent-activity-panel'
   ];
 
-  // HTML defaults: only "Start build" ships open; all others ship collapsed.
-  var DEFAULTS = { 'start-build-panel': true };
+  // HTML defaults: "Start build" and "Recent agent activity" ship open; all others ship collapsed.
+  var DEFAULTS = { 'start-build-panel': true, 'recent-agent-activity-panel': true };
 
   function sectionEl(id) {
     var el = document.getElementById(id);

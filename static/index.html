@@ -120,10 +120,10 @@
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2 id="agent-activity-title">Agent activity summary</h2></div><span class="hint">Aggregated</span></div>
         <div id="agent-activity-body" class="health-grid" role="status" aria-live="polite"></div>
       </section>
-      <section class="panel span-2">
-        <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></div>
+      <details class="panel span-2" id="recent-agent-activity-panel" open>
+        <summary class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></summary>
         <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>
-      </section>
+      </details>
       <section class="panel span-2">
         <div class="panel-head"><div><p class="eyebrow">WORKFLOWS</p><h2>Recent workflows</h2></div><span class="hint">Newest first</span></div>
         <div class="table-wrap"><table><thead><tr><th>Project</th><th>Objective</th><th>Status</th><th>Repair</th><th>Origin</th><th>Models</th><th>Stages</th><th>Tokens (in/out/total)</th><th>Created</th></tr></thead><tbody id="workflows"></tbody></table></div>
