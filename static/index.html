@@ -116,6 +116,10 @@
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Running now</h2></div><span class="hint">Live</span></div>
         <div id="running-now" class="running-now-list" aria-live="polite"></div>
       </section>
+      <section class="panel span-2" id="agent-activity" aria-labelledby="agent-activity-title">
+        <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2 id="agent-activity-title">Agent activity summary</h2></div><span class="hint">Aggregated</span></div>
+        <div id="agent-activity-body" class="health-grid" role="status" aria-live="polite"></div>
+      </section>
       <section class="panel span-2">
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></div>
         <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>
