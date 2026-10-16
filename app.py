@@ -1052,6 +1052,91 @@ async def login_page():
     return HTMLResponse(content=_get_login_page_html())
 
 
+_VALIDATION_OUTCOMES = frozenset({
+    "not_attempted", "passed", "nonzero", "timeout",
+    "invalid_request", "execution_error", "suppressed", "unknown",
+})
+_VALIDATION_RECOVERY_STATES = frozenset({"not_attempted", "failed", "recovered"})
+_VALIDATION_MAX = 1_000_000
+
+
+def _safe_validation_diagnostics(entry: dict) -> dict:
+    """Project five validation telemetry fields with strict validation.
+
+    For implementer/tester roles: validate request/execution/outcome triple
+    and recovery pair independently. For other roles: all five NULL.
+    Missing/invalid => None (NULL). Never mutates the input dict.
+    """
+    role = entry.get("role")
+    if role not in ("implementer", "tester"):
+        return {
+            "validation_request_count": None,
+            "validation_execution_count": None,
+            "validation_last_outcome": None,
+            "validation_recovery_attempted": None,
+            "validation_recovery_outcome": None,
+        }
+
+    # --- request/execution/outcome triple ---
+    req = entry.get("validation_request_count")
+    exe = entry.get("validation_execution_count")
+    outcome = entry.get("validation_last_outcome")
+
+    def _valid_count(v):
+        if isinstance(v, bool) or not isinstance(v, int):
+            return False
+        return 0 <= v <= _VALIDATION_MAX
+
+    triple_valid = (
+        _valid_count(req)
+        and _valid_count(exe)
+        and exe <= req
+        and isinstance(outcome, str)
+        and outcome in _VALIDATION_OUTCOMES
+    )
+    if triple_valid:
+        if req == 0 and outcome != "not_attempted":
+            triple_valid = False
+        if req > 0 and outcome == "not_attempted":
+            triple_valid = False
+        if outcome in ("passed", "nonzero", "timeout") and exe < 1:
+            triple_valid = False
+
+    if not triple_valid:
+        req = exe = outcome = None
+
+    # --- recovery pair (implementer only) ---
+    rec_count = entry.get("validation_recovery_attempted")
+    rec_state = entry.get("validation_recovery_outcome")
+
+    if role == "implementer":
+        rec_valid = (
+            not isinstance(rec_count, bool)
+            and isinstance(rec_count, int)
+            and rec_count in (0, 1)
+            and isinstance(rec_state, str)
+            and rec_state in _VALIDATION_RECOVERY_STATES
+        )
+        if rec_valid:
+            if rec_count == 0 and rec_state != "not_attempted":
+                rec_valid = False
+            if rec_count == 1 and rec_state == "not_attempted":
+                rec_valid = False
+        if not rec_valid:
+            rec_count = rec_state = None
+    else:
+        # tester: recovery not applicable
+        rec_count = rec_state = None
+
+    return {
+        "validation_request_count": req,
+        "validation_execution_count": exe,
+        "validation_last_outcome": outcome,
+        "validation_recovery_attempted": rec_count,
+        "validation_recovery_outcome": rec_state,
+    }
+
+
 def _project_dashboard(raw: dict) -> dict:
     """Project the gateway dashboard payload, adding safe repair visibility.
 
@@ -1102,6 +1187,17 @@ def _project_dashboard(raw: dict) -> dict:
             )
             projected_workflows.append(entry)
         result["recent_workflows"] = projected_workflows
+
+    jobs = raw.get("jobs")
+    if isinstance(jobs, list):
+        projected_jobs = []
+        for j in jobs:
+            if not isinstance(j, dict):
+                continue
+            entry = dict(j)
+            entry.update(_safe_validation_diagnostics(j))
+            projected_jobs.append(entry)
+        result["jobs"] = projected_jobs
 
     result["recent_workflow_reliability"] = _safe_recent_workflow_reliability(
         raw.get("recent_workflow_reliability")

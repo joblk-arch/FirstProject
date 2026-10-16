@@ -113,7 +113,7 @@ function extractFunction(src, name) {
 }
 
 // --- Extract the three renderers; fail clearly if any is missing ---
-const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks', 'renderCompletionRecovery'];
+const REQUIRED = ['renderClusterHealth', 'renderStatusCountsCard', 'renderClusterHealthError', 'renderRunningNow', 'renderUpsStatus', 'renderRecentWorkflowReliability', 'renderWorkflowBottlenecks', 'renderCompletionRecovery', 'renderValidationDiagnostics'];
 const extracted = {};
 for (const name of REQUIRED) {
   const fn = extractFunction(source, name);
@@ -1423,6 +1423,162 @@ check('Completion recovery: each accounting invariant and empty-window activity 
     const data = crFixture(); data[key] = key === 'sample_count' ? 0 : data[key] + 1;
     assert(crHtml(data).includes('Unavailable'), key);
   }
+});
+
+// --- renderValidationDiagnostics tests ---
+const { renderValidationDiagnostics: vdFn } = context;
+assert(typeof vdFn === 'function', 'renderValidationDiagnostics must be defined in context');
+
+function vdHtml() { return $('validation-diagnostics-body').innerHTML; }
+
+check('Validation diagnostics: null => Unavailable', () => {
+  vdFn(null);
+  assert(vdHtml().includes('Unavailable'), 'null should show Unavailable');
+});
+
+check('Validation diagnostics: undefined => Unavailable', () => {
+  vdFn(undefined);
+  assert(vdHtml().includes('Unavailable'), 'undefined should show Unavailable');
+});
+
+check('Validation diagnostics: non-array => Unavailable', () => {
+  vdFn('garbage');
+  assert(vdHtml().includes('Unavailable'), 'non-array should show Unavailable');
+});
+
+check('Validation diagnostics: empty array => No recent validation jobs', () => {
+  vdFn([]);
+  assert(vdHtml().includes('No recent validation jobs'), 'empty should show message');
+});
+
+check('Validation diagnostics: valid implementer row renders', () => {
+  vdFn([{role:'implementer',stage:'build',project:'alpha',validation_request_count:10,validation_execution_count:8,validation_last_outcome:'passed',validation_recovery_attempted:1,validation_recovery_outcome:'recovered'}]);
+  const h = vdHtml();
+  assert(h.includes('build/alpha'), 'stage/project label');
+  assert(h.includes('10'), 'requests=10');
+  assert(h.includes('8'), 'executions=8');
+  assert(h.includes('Passed'), 'outcome label');
+  assert(h.includes('Recovered'), 'recovery label');
+});
+
+check('Validation diagnostics: zero requests => Not attempted', () => {
+  vdFn([{role:'implementer',stage:'s',project:'p',validation_request_count:0,validation_execution_count:0,validation_last_outcome:'not_attempted',validation_recovery_attempted:0,validation_recovery_outcome:'not_attempted'}]);
+  const h = vdHtml();
+  assert(h.includes('0'), 'explicit 0 display');
+  assert(h.includes('Not attempted'), 'not_attempted label');
+});
+
+check('Validation diagnostics: missing fields => Not recorded', () => {
+  vdFn([{role:'implementer',stage:'s',project:'p'}]);
+  const h = vdHtml();
+  assert(h.includes('Not recorded'), 'missing outcome => Not recorded');
+});
+
+check('Validation diagnostics: tester recovery => Not applicable', () => {
+  vdFn([{role:'tester',stage:'s',project:'p',validation_request_count:5,validation_execution_count:3,validation_last_outcome:'passed',validation_recovery_attempted:1,validation_recovery_outcome:'recovered'}]);
+  const h = vdHtml();
+  assert(h.includes('Not applicable'), 'tester recovery => Not applicable');
+});
+
+check('Validation diagnostics: malicious injection is escaped', () => {
+  vdFn([{role:'implementer',stage:'<script>alert(1)</script>',project:'<img src=x onerror=alert(2)>',validation_request_count:1,validation_execution_count:1,validation_last_outcome:'passed',validation_recovery_attempted:0,validation_recovery_outcome:'not_attempted'}]);
+  const h = vdHtml();
+  assert(!h.includes('<script>'), 'script tag escaped');
+  assert(!h.includes('<img'), 'img tag escaped');
+});
+
+check('Validation diagnostics: caps at 20 rows', () => {
+  const jobs = Array.from({length:25},(_,i)=>({role:'implementer',stage:'s'+i,project:'p',validation_request_count:1,validation_execution_count:1,validation_last_outcome:'passed',validation_recovery_attempted:0,validation_recovery_outcome:'not_attempted'}));
+  vdFn(jobs);
+  const rowCount = (vdHtml().match(/<tr>/g) || []).length - 1; // subtract header
+  assert(rowCount === 20, `expected 20 rows, got ${rowCount}`);
+});
+
+check('Validation diagnostics: invalid triple => Not recorded', () => {
+  vdFn([{role:'implementer',stage:'s',project:'p',validation_request_count:10,validation_execution_count:20,validation_last_outcome:'passed',validation_recovery_attempted:0,validation_recovery_outcome:'not_attempted'}]);
+  const h = vdHtml();
+  assert(h.includes('Not recorded'), 'exec>req invalid => Not recorded');
+});
+
+check('Validation diagnostics: render wiring in render()', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../../static/app.js'), 'utf8');
+  assert(src.includes('renderValidationDiagnostics(data.jobs)'), 'render calls renderValidationDiagnostics');
+  assert(src.includes('renderValidationDiagnostics(null)'), 'load catch calls renderValidationDiagnostics(null)');
+});
+
+check('Validation diagnostics: HTML root inside existing wrapper', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../../static/index.html'), 'utf8');
+  assert(html.includes('id="validation-diagnostics"'), 'root id present');
+  assert(html.includes('Reliability and diagnostics'), 'inside reliability section');
+  const relIdx = html.indexOf('id="reliability-section"');
+  const vdIdx = html.indexOf('id="validation-diagnostics"');
+  assert(relIdx !== -1 && vdIdx !== -1 && vdIdx > relIdx, 'validation-diagnostics inside reliability-section');
+});
+
+check('Validation diagnostics: deployed gateway contract fixture', () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../fixtures/validation_dashboard.json'), 'utf8'));
+  const before = JSON.stringify(fixture);
+  vdFn(fixture.jobs);
+  const h = vdHtml();
+  assert(h.includes('implement/fixture') && h.includes('test/fixture'));
+  assert(h.includes('<td>4</td><td>2</td><td>Suppressed</td><td>Recovered</td>'));
+  assert(h.includes('<td>0</td><td>0</td><td>Not attempted</td><td>Not applicable</td>'));
+  assert(h.includes('Not recorded'));
+  assert(!h.includes('Unavailable'));
+  assert.strictEqual(JSON.stringify(fixture), before);
+});
+
+check('Validation diagnostics: roles filtered BEFORE the 20-row cap', () => {
+  const irrelevant = Array.from({length:25}, () => ({role:'planner',stage:'SECRET_PLANNER'}));
+  vdFn([...irrelevant, null, 42, {role:'implementer',stage:'visible-implementer'}]);
+  assert(vdHtml().includes('visible-implementer'));
+  assert(!vdHtml().includes('SECRET_PLANNER'));
+  assert.strictEqual((vdHtml().match(/<tr>/g) || []).length, 2);
+  vdFn(irrelevant);
+  assert(vdHtml().includes('No recent validation jobs'));
+});
+
+check('Validation diagnostics: invalid telemetry is never displayed as recorded', () => {
+  const good = {role:'implementer',stage:'fixture',validation_request_count:3,
+    validation_execution_count:2,validation_last_outcome:'passed',
+    validation_recovery_attempted:1,validation_recovery_outcome:'recovered'};
+  for (const patch of [
+    {validation_request_count:true}, {validation_execution_count:false},
+    {validation_request_count:'3'}, {validation_execution_count:1.5},
+    {validation_request_count:1000001}, {validation_execution_count:-1},
+    {validation_execution_count:4}, {validation_last_outcome:'<img SECRET>'},
+    {validation_request_count:0,validation_execution_count:0},
+    {validation_execution_count:0}, {validation_last_outcome:'not_attempted'},
+  ]) {
+    vdFn([{...good,...patch}]);
+    assert(vdHtml().includes('<td>—</td><td>—</td><td>Not recorded</td><td>Recovered</td>'));
+    assert(!vdHtml().includes('SECRET'));
+  }
+  for (const patch of [
+    {validation_recovery_attempted:true}, {validation_recovery_attempted:'1'},
+    {validation_recovery_attempted:0}, {validation_recovery_outcome:'not_attempted'},
+    {validation_recovery_outcome:'<script>SECRET</script>'},
+  ]) {
+    vdFn([{...good,...patch}]);
+    assert(vdHtml().includes('<td>3</td><td>2</td><td>Passed</td><td>Not recorded</td>'));
+    assert(!vdHtml().includes('SECRET'));
+  }
+});
+
+check('Validation diagnostics: stable unique heading and actual details containment', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../../static/index.html'), 'utf8');
+  const start = html.indexOf('id="reliability-section"');
+  const end = html.indexOf('</details>', start);
+  const root = html.indexOf('id="validation-diagnostics"');
+  assert(root > start && root < end);
+  assert.strictEqual((html.match(/id="validation-diagnostics-title"/g) || []).length, 1);
+  vdFn([{role:'implementer'}]);
+  assert(!vdHtml().includes('id="validation-diagnostics-title"'));
+  const renderSource = extractFunction(source, 'render');
+  const loadSource = extractFunction(source, 'load');
+  assert(renderSource.includes('renderValidationDiagnostics(data.jobs)'));
+  assert(!renderSource.includes('recent_jobs'));
+  assert(loadSource.indexOf('renderValidationDiagnostics(null)') < loadSource.indexOf("if(error.message==='Session expired') return"));
 });
 
 console.log(`\n${passed}/${total} checks passed`);

@@ -1,0 +1,12 @@
+{
+  "generated_at": "2026-10-16T00:00:00+00:00",
+  "projects": [{"name": "fixture", "default_branch": "main"}],
+  "counts": [],
+  "usage": [],
+  "recent_workflows": [],
+  "jobs": [
+    {"id": "fixture-impl", "role": "implementer", "stage": "implement", "project": "fixture", "status": "failed", "validation_request_count": 4, "validation_execution_count": 2, "validation_last_outcome": "suppressed", "validation_recovery_attempted": 1, "validation_recovery_outcome": "recovered"},
+    {"id": "fixture-tester", "role": "tester", "stage": "test", "project": "fixture", "status": "completed", "validation_request_count": 0, "validation_execution_count": 0, "validation_last_outcome": "not_attempted", "validation_recovery_attempted": null, "validation_recovery_outcome": null},
+    {"id": "fixture-legacy", "role": "implementer", "stage": "implement", "project": "fixture", "status": "archived", "validation_request_count": null, "validation_execution_count": null, "validation_last_outcome": null, "validation_recovery_attempted": null, "validation_recovery_outcome": null}
+  ]
+}

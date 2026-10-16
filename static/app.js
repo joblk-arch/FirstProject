@@ -89,6 +89,7 @@ function render(data) {
   }).join('') : '<tr><td colspan="9" class="empty">No workflows recorded yet.</td></tr>';
   $('updated').textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
   $('error').hidden = true;
+  renderValidationDiagnostics(data.jobs);
 }
 
 function renderUpsStatus(data) {
@@ -633,7 +634,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
@@ -998,4 +999,74 @@ function renderCompletionRecovery(data) {
     `Recovery rate: ${rateText}`,
   ].map(t => `<span class="reliability-note">${safe(t)}</span>`).join('');
   el.innerHTML = `${heading}${warning}<div class="reliability-grid">${rows}</div><p class="reliability-note">Only recorded completion continuations; workflow window excludes standalone. Missing historical telemetry is not zero. Counters are not proof of code correctness.</p>`;
+}
+
+function renderValidationDiagnostics(jobs) {
+  const el = $('validation-diagnostics-body');
+  if (!el) return;
+  // The stable accessible heading lives outside this refresh root.
+  const heading = '';
+  if (jobs === null || jobs === undefined) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  if (!Array.isArray(jobs)) {
+    el.innerHTML = heading + '<p class="reliability-note">Unavailable</p>';
+    return;
+  }
+  if (jobs.length === 0) {
+    el.innerHTML = heading + '<p class="reliability-note">No recent validation jobs</p>';
+    return;
+  }
+  const VALID_OUTCOMES = new Set(['not_attempted','passed','nonzero','timeout','invalid_request','execution_error','suppressed','unknown']);
+  const VALID_RECOVERY = new Set(['not_attempted','failed','recovered']);
+  const OUTCOME_LABELS = {not_attempted:'Not attempted',passed:'Passed',nonzero:'Nonzero',timeout:'Timeout',invalid_request:'Invalid request',execution_error:'Execution error',suppressed:'Suppressed',unknown:'Unknown'};
+  const RECOVERY_LABELS = {not_attempted:'Not attempted',failed:'Failed',recovered:'Recovered'};
+  function esc(v) { return safe(v); }
+  function isSafeInt(v) { return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 1000000; }
+  const eligible = jobs.filter(j => j && typeof j === 'object' &&
+    (j.role === 'implementer' || j.role === 'tester'));
+  if (!eligible.length) {
+    el.innerHTML = '<p class="reliability-note">No recent validation jobs</p>';
+    return;
+  }
+  const rows = eligible.slice(0, 20).map(j => {
+    const role = typeof j.role === 'string' ? j.role : '';
+    const stage = typeof j.stage === 'string' ? j.stage : '';
+    const project = typeof j.project === 'string' ? j.project : '';
+    const label = stage ? (project ? stage + '/' + project : stage) : (project || '\u2014');
+    // Revalidate triple
+    let req = j.validation_request_count, exe = j.validation_execution_count, outcome = j.validation_last_outcome;
+    let tripleOk = isSafeInt(req) && isSafeInt(exe) && exe <= req && typeof outcome === 'string' && VALID_OUTCOMES.has(outcome);
+    if (tripleOk) {
+      if (req === 0 && outcome !== 'not_attempted') tripleOk = false;
+      if (req > 0 && outcome === 'not_attempted') tripleOk = false;
+      if ((outcome === 'passed' || outcome === 'nonzero' || outcome === 'timeout') && exe < 1) tripleOk = false;
+    }
+    if (!tripleOk) { req = null; exe = null; outcome = null; }
+    // Revalidate recovery pair
+    let recCount = j.validation_recovery_attempted, recState = j.validation_recovery_outcome;
+    if (role === 'implementer') {
+      let recOk = typeof recCount === 'number' && Number.isInteger(recCount) && (recCount === 0 || recCount === 1) && typeof recState === 'string' && VALID_RECOVERY.has(recState);
+      if (recOk) {
+        if (recCount === 0 && recState !== 'not_attempted') recOk = false;
+        if (recCount === 1 && recState === 'not_attempted') recOk = false;
+      }
+      if (!recOk) { recCount = null; recState = null; }
+    } else { recCount = null; recState = null; }
+    // Display mappings
+    const reqText = req === null ? '\u2014' : String(req);
+    const exeText = exe === null ? '\u2014' : String(exe);
+    let outcomeText;
+    if (outcome === null) outcomeText = 'Not recorded';
+    else if (outcome === 'not_attempted') outcomeText = 'Not attempted';
+    else outcomeText = OUTCOME_LABELS[outcome] || 'Not recorded';
+    let recText;
+    if (role === 'tester') recText = 'Not applicable';
+    else if (recState === null) recText = 'Not recorded';
+    else recText = RECOVERY_LABELS[recState] || 'Not recorded';
+    return `<tr><td>${esc(label)}</td><td>${esc(reqText)}</td><td>${esc(exeText)}</td><td>${esc(outcomeText)}</td><td>${esc(recText)}</td></tr>`;
+  }).join('');
+  const note = 'Sandbox executions are not proof that tests passed. Historical data may not be recorded.';
+  el.innerHTML = heading + `<table class="reliability-table"><thead><tr><th>Stage/project</th><th>Requests</th><th>Executions</th><th>Last outcome</th><th>Validation recovery</th></tr></thead><tbody>${rows}</tbody></table><p class="reliability-note">${esc(note)}</p>`;
 }

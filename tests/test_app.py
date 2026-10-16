@@ -3874,7 +3874,11 @@ def test_dashboard_preserves_existing_fields(password_file, gateway_key_file, au
         response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
     data = response.json()
     # All original fields preserved
-    assert data["jobs"] == payload["jobs"]
+    validation_nulls = dict.fromkeys((
+        "validation_request_count", "validation_execution_count", "validation_last_outcome",
+        "validation_recovery_attempted", "validation_recovery_outcome",
+    ))
+    assert data["jobs"] == [{**job, **validation_nulls} for job in payload["jobs"]]
     assert data["usage"] == payload["usage"]
     assert data["counts"] == payload["counts"]
     assert data["projects"] == payload["projects"]
@@ -3886,6 +3890,28 @@ def test_dashboard_preserves_existing_fields(password_file, gateway_key_file, au
     assert wf["overall"] == "running"
     assert wf["origin"] == "telegram"
     assert wf["models"] == ["local-model"]
+
+
+def test_dashboard_deployed_validation_contract(password_file, gateway_key_file, auth_headers):
+    """Actual authenticated dashboard route preserves the deployed gateway schema."""
+    import copy
+    import json
+    payload = json.loads((Path(__file__).parent / "fixtures" / "validation_dashboard.json").read_text())
+    original = copy.deepcopy(payload)
+    mock_client = _make_async_client_mock(_make_gateway_response(200, payload))
+    with patch.object(app, "PASSWORD_FILE", password_file), \
+         patch.object(app, "GATEWAY_KEY_FILE", gateway_key_file), \
+         patch("app.httpx.AsyncClient", return_value=mock_client):
+        response = TestClient(app.app).get("/api/dashboard", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["jobs"] == original["jobs"]
+    assert payload == original
+    assert "recent_jobs" not in data
+    assert data["jobs"][0]["validation_request_count"] == 4
+    assert data["jobs"][0]["validation_recovery_outcome"] == "recovered"
+    assert data["jobs"][1]["validation_execution_count"] == 0
+    assert data["jobs"][2]["validation_execution_count"] is None
 
 
 def test_dashboard_repair_state_ready_after_repair(password_file, gateway_key_file, auth_headers):
