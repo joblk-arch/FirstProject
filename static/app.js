@@ -716,12 +716,14 @@ workflowContent.addEventListener('click',(event)=>{const retry=event.target.clos
 $('workflow-close').addEventListener('click',()=>dialog.close());
 dialog.addEventListener('click',(event)=>{if(event.target===dialog)dialog.close();});
 async function loadAlerts() {
+  const hint = $('alerts-hint');
   try {
     const response = await fetch('/api/alerts', {cache: 'no-store'});
-    if (_handle401(response)) return;
+    if (response.status === 401) { if (hint) hint.textContent = 'Alert data unavailable'; _handle401(response); return; }
     if (!response.ok) throw new Error(`Alerts returned ${response.status}`);
     renderAlerts(await response.json());
   } catch (error) {
+    if (hint) hint.textContent = 'Alert data unavailable';
     const container = $('alerts');
     if (container) container.innerHTML = '<p class="muted-copy">Alert data unavailable.</p>';
   }
@@ -734,7 +736,7 @@ function renderAlerts(data) {
   if (!container) return;
   const active = Array.isArray(data.active) ? data.active : [];
   const history = Array.isArray(data.history) ? data.history : [];
-  if (hint) hint.textContent = active.length ? `${active.length} active` : 'None active';
+  if (hint) hint.textContent = active.length ? `${active.length} awaiting acknowledgement` : 'None active';
   const isAdmin = sessionIdentity.role === 'admin';
   container.innerHTML = active.length ? active.map((a) => {
     const id = a.job_id ? safe(a.job_id) : '';

@@ -20,7 +20,10 @@
     'work-distribution-panel',
     'token-ledger-panel',
     'start-build-panel',
-    'recent-agent-activity-panel'
+    'recent-agent-activity-panel',
+    'alerts-panel',
+    'recent-workflows-panel',
+    'user-management'
   ];
 
   // HTML defaults: "Start build" and "Recent agent activity" ship open; all others ship collapsed.

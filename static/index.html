@@ -107,11 +107,11 @@
         </summary>
         <div id="ups-status" class="ups-grid" role="status" aria-live="polite"></div>
       </details>
-      <section class="panel span-2" id="alerts-panel" aria-labelledby="alerts-title">
-        <div class="panel-head"><div><p class="eyebrow">ALERTS</p><h2 id="alerts-title">Active alerts</h2></div><span class="hint" id="alerts-hint"></span></div>
+      <details class="panel span-2" id="alerts-panel" aria-labelledby="alerts-title">
+        <summary class="panel-head"><div><p class="eyebrow">ALERTS</p><h2 id="alerts-title">Active alerts</h2></div><span class="hint" id="alerts-hint" aria-live="polite"></span></summary>
         <div id="alerts" class="alerts-list" role="status" aria-live="polite"></div>
         <div id="alerts-history" class="alerts-history" aria-label="Acknowledged alert history"></div>
-      </section>
+      </details>
       <section class="panel span-2">
         <div class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Running now</h2></div><span class="hint">Live</span></div>
         <div id="running-now" class="running-now-list" aria-live="polite"></div>
@@ -124,10 +124,10 @@
         <summary class="panel-head"><div><p class="eyebrow">EXECUTION</p><h2>Recent agent activity</h2></div><span class="hint">Newest first</span></summary>
         <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Project</th><th>Status</th><th>Model</th><th>Tokens</th><th>Duration</th></tr></thead><tbody id="jobs"></tbody></table></div>
       </details>
-      <section class="panel span-2">
-        <div class="panel-head"><div><p class="eyebrow">WORKFLOWS</p><h2>Recent workflows</h2></div><span class="hint">Newest first</span></div>
+      <details class="panel span-2" id="recent-workflows-panel">
+        <summary class="panel-head"><div><p class="eyebrow">WORKFLOWS</p><h2>Recent workflows</h2></div><span class="hint">Newest first</span></summary>
         <div class="table-wrap"><table><thead><tr><th>Project</th><th>Objective</th><th>Status</th><th>Repair</th><th>Origin</th><th>Models</th><th>Stages</th><th>Tokens (in/out/total)</th><th>Created</th></tr></thead><tbody id="workflows"></tbody></table></div>
-      </section>
+      </details>
       <details class="panel" id="work-distribution-panel">
         <summary class="panel-head"><div><p class="eyebrow">PROJECTS</p><h2>Work distribution</h2></div></summary>
         <div id="projects" class="stack"></div>
@@ -137,11 +137,11 @@
         <div id="models" class="stack"></div>
       </details>
     </div>
-    <section class="panel span-2" id="user-management" hidden aria-labelledby="user-management-title">
-      <div class="panel-head">
+    <details class="panel span-2" id="user-management" hidden aria-labelledby="user-management-title">
+      <summary class="panel-head">
         <div><p class="eyebrow">USER MANAGEMENT</p><h2 id="user-management-title">Accounts</h2></div>
         <span class="hint">Admin only</span>
-      </div>
+      </summary>
       <form id="user-create-form" class="user-create-form" novalidate>
         <div class="user-create-grid">
           <div class="build-field">
@@ -173,7 +173,7 @@
           <tbody id="user-table-body"></tbody>
         </table>
       </div>
-    </section>
+    </details>
     <p class="error" id="error" role="alert" hidden></p>
   </main>
   <dialog id="workflow-dialog" class="workflow-dialog" aria-labelledby="workflow-title">

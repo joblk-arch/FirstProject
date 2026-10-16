@@ -132,7 +132,42 @@ function standardElements() {
     'token-ledger-panel': makeDetailsEl('token-ledger-panel', false),
     'start-build-panel': makeDetailsEl('start-build-panel', true),
     'recent-agent-activity-panel': makeDetailsEl('recent-agent-activity-panel', true),
+    'alerts-panel': makeDetailsEl('alerts-panel', false),
+    'recent-workflows-panel': makeDetailsEl('recent-workflows-panel', false),
+    'user-management': makeDetailsEl('user-management', false),
   };
+}
+
+for (const id of ['alerts-panel', 'recent-workflows-panel', 'user-management']) {
+  check(`${id}: own toggle persists and reload restores both booleans`, () => {
+    for (const opened of [true, false]) {
+      const els = standardElements();
+      els[id].hidden = id === 'user-management';
+      const {ctx, ls} = buildContext({elements: els});
+      vm.runInContext(source, ctx);
+      assert.strictEqual(els[id].listeners.toggle.length, 1);
+      els[id].open = opened;
+      els[id].dispatchToggle();
+      const saved = ls.getItem('firstproject.dashboard.expansion.v1');
+      assert.strictEqual(JSON.parse(saved)[id], opened);
+      const fresh = standardElements();
+      const reload = buildContext({elements: fresh, storageValue: saved});
+      vm.runInContext(source, reload.ctx);
+      assert.strictEqual(fresh[id].open, opened);
+      assert.strictEqual(els[id].hidden, id === 'user-management');
+    }
+  });
+  check(`${id}: old, invalid and unavailable storage preserve closed default`, () => {
+    for (const options of [{storageValue: '{bad'}, {storageValue: '[]'},
+      {storageValue: '{"start-build-panel":false}'}, {throwOnAccess: true},
+      {storageValue: JSON.stringify({[id]: 'open'})}]) {
+      const els = standardElements();
+      const {ctx} = buildContext({...options, elements: els});
+      vm.runInContext(source, ctx);
+      assert.strictEqual(els[id].open, false);
+      assert.strictEqual(els['recent-agent-activity-panel'].open, true);
+    }
+  });
 }
 
 // --- Test 1: Defaults applied when storage is empty ---

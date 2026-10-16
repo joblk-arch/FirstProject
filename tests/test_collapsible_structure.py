@@ -37,15 +37,18 @@ def test_actual_collapsible_structure():
     wrappers = {'reliability-section': False, 'start-build-panel': True,
                 'cluster-health-panel': False, 'ups-panel': False,
                 'work-distribution-panel': False, 'token-ledger-panel': False,
-                'recent-agent-activity-panel': True}
+                'recent-agent-activity-panel': True,
+                'alerts-panel': False, 'recent-workflows-panel': False,
+                'user-management': False}
     for key, opened in wrappers.items():
         node = by_id[key]
-        assert node['tag'] == 'details'
-        assert ('open' in node['attrs']) is opened
-        assert node['children'][0]['tag'] == 'summary'
+        assert node['tag'] == 'details', f'{key} must be a details element'
+        assert ('open' in node['attrs']) is opened, f'{key} open attr mismatch'
+        assert node['children'][0]['tag'] == 'summary', f'{key} first child must be summary'
         summary = node['children'][0]
         assert not any(n['tag'] in {'button', 'input', 'select', 'textarea', 'a'}
-                       and summary in n['parents'] for n in page.nodes)
+                       and summary in n['parents'] for n in page.nodes), \
+            f'{key} summary must not contain interactive controls'
     roots = {'reliability-card': 'reliability-section',
              'recent-workflow-reliability': 'reliability-section',
              'workflow-bottlenecks': 'reliability-section',
@@ -57,10 +60,21 @@ def test_actual_collapsible_structure():
     for root, wrapper in roots.items():
         assert by_id[wrapper] in by_id[root]['parents']
         assert by_id[root]['tag'] != 'details'
-    for key in ['metrics', 'alerts', 'running-now', 'workflows', 'user-management']:
-        assert not any(n['tag'] == 'details' for n in by_id[key]['parents'])
+    # alerts and workflows are now inside their details wrappers
+    assert by_id['alerts-panel'] in by_id['alerts']['parents']
+    assert by_id['recent-workflows-panel'] in by_id['workflows']['parents']
+    # user-management is a details with hidden
+    assert by_id['user-management']['tag'] == 'details'
     assert 'hidden' in by_id['user-management']['attrs']
-    assert by_id['user-management']['tag'] == 'section'
+    assert 'aria-labelledby' in by_id['user-management']['attrs']
+    # alerts-hint must have aria-live polite
+    assert by_id['alerts-hint']['attrs'].get('aria-live') == 'polite'
+    assert by_id['alerts-panel']['children'][0] in by_id['alerts-hint']['parents']
+    assert by_id['alerts-panel'] in by_id['alerts-history']['parents']
+    for key in ['user-create-form', 'user-table-body']:
+        assert by_id['user-management'] in by_id[key]['parents']
+    for key in ['user-confirm-modal', 'user-password-modal', 'metrics', 'running-now']:
+        assert not any(n['tag'] == 'details' for n in by_id[key]['parents'])
 
 
 def test_recent_activity_heading_and_table_are_preserved():
