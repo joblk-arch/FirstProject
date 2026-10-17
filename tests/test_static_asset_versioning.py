@@ -20,6 +20,7 @@ def _sha256_short(data: bytes) -> str:
 def _make_static_dir(tmp_path: Path, app_js: str = "console.log('app');",
                      styles_css: str = "body{color:red}",
                      user_mgmt_js: str = "console.log('user-management');\n",
+                     user_mgmt_css: str = "body{color:green}\n",
                      index_html: str | None = None,
                      login_html: str | None = None) -> Path:
     """Create a minimal static directory with known content."""
@@ -30,11 +31,13 @@ def _make_static_dir(tmp_path: Path, app_js: str = "console.log('app');",
     (static / "dashboard-collapsible.js").write_text("console.log('collapsible');\n", encoding="utf-8")
     (static / "collapsible.css").write_text("body{color:blue}\n", encoding="utf-8")
     (static / "user-management.js").write_text(user_mgmt_js, encoding="utf-8")
+    (static / "user-management.css").write_text(user_mgmt_css, encoding="utf-8")
 
     if index_html is None:
         index_html = (
             '<html><head>\n'
             '  <link rel="stylesheet" href="/styles.css">\n'
+            '  <link rel="stylesheet" href="/user-management.css">\n'
             '</head><body>\n'
             '  <script src="/app.js?v=reliability-counts-3" defer></script>\n'
             '  <script src="/user-management.js" defer></script>\n'
@@ -216,6 +219,7 @@ def test_missing_html_file_failure(tmp_path):
     (static / "dashboard-collapsible.js").write_text("z", encoding="utf-8")
     (static / "collapsible.css").write_text("w", encoding="utf-8")
     (static / "user-management.js").write_text("u", encoding="utf-8")
+    (static / "user-management.css").write_text("c", encoding="utf-8")
     (static / "index.html").write_text('<html></html>', encoding="utf-8")
     # login.html is missing
 
@@ -502,3 +506,179 @@ def test_unknown_asset_references_still_untouched(tmp_path):
     # Unknown references must be untouched
     assert "/unknown-lib.css?v=keep-me" in index
     assert "/some-other-lib.js?v=also-keep" in index
+
+
+# ---------------------------------------------------------------------------
+# 20. user-management.css: exact content digest URL
+# ---------------------------------------------------------------------------
+
+def test_user_management_css_exact_content_digest_url(tmp_path):
+    """The ?v= value for user-management.css must equal the SHA256 short hash of its content."""
+    user_mgmt_css = "body{color:green}\n"
+    static = _make_static_dir(tmp_path, user_mgmt_css=user_mgmt_css)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    expected_hash = _sha256_short(user_mgmt_css.encode())
+    assert f"/user-management.css?v={expected_hash}" in index
+
+
+# ---------------------------------------------------------------------------
+# 21. user-management.css: replacing preexisting query
+# ---------------------------------------------------------------------------
+
+def test_user_management_css_replacing_preexisting_query(tmp_path):
+    """A preexisting ?v=stale-456 on user-management.css is replaced with the content hash."""
+    user_mgmt_css = "body{color:green}\n"
+    index_html = (
+        '<html><head>\n'
+        '  <link rel="stylesheet" href="/styles.css">\n'
+        '  <link rel="stylesheet" href="/user-management.css?v=stale-456">\n'
+        '</head><body>\n'
+        '  <script src="/app.js" defer></script>\n'
+        '  <script src="/user-management.js" defer></script>\n'
+        '</body></html>\n'
+    )
+    static = _make_static_dir(tmp_path, user_mgmt_css=user_mgmt_css, index_html=index_html)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    assert "stale-456" not in index
+    expected_hash = _sha256_short(user_mgmt_css.encode())
+    assert f"/user-management.css?v={expected_hash}" in index
+
+
+# ---------------------------------------------------------------------------
+# 22. user-management.css: repeat build idempotent
+# ---------------------------------------------------------------------------
+
+def test_user_management_css_rerun_idempotent(tmp_path):
+    """Running the helper twice with user-management.css produces identical output."""
+    static = _make_static_dir(tmp_path)
+
+    vsa.version_static_assets(static)
+    first = (static / "index.html").read_text()
+
+    vsa.version_static_assets(static)
+    second = (static / "index.html").read_text()
+
+    assert first == second
+    # No double query strings
+    assert "??v=" not in first
+    assert not re.search(r"\?v=[^\"']+&v=", first)
+
+
+# ---------------------------------------------------------------------------
+# 23. user-management.css: changed content changes its URL only
+# ---------------------------------------------------------------------------
+
+def test_user_management_css_changed_content_changes_url_only(tmp_path):
+    """Modifying user-management.css changes only its URL; all other asset URLs unaffected."""
+    user_mgmt_css_v1 = "body{color:green}\n"
+    user_mgmt_css_v2 = "body{color:blue}\n"
+    app_js = "console.log('app');\n"
+    styles_css = "body{color:red}\n"
+    user_mgmt_js = "console.log('um');\n"
+
+    # Include all asset references in the fixture
+    index_html = (
+        '<html><head>\n'
+        '  <link rel="stylesheet" href="/styles.css">\n'
+        '  <link rel="stylesheet" href="/collapsible.css">\n'
+        '  <link rel="stylesheet" href="/user-management.css">\n'
+        '</head><body>\n'
+        '  <script src="/app.js" defer></script>\n'
+        '  <script src="/dashboard-collapsible.js" defer></script>\n'
+        '  <script src="/user-management.js" defer></script>\n'
+        '</body></html>\n'
+    )
+
+    static = _make_static_dir(
+        tmp_path,
+        app_js=app_js,
+        styles_css=styles_css,
+        user_mgmt_js=user_mgmt_js,
+        user_mgmt_css=user_mgmt_css_v1,
+        index_html=index_html,
+    )
+
+    vsa.version_static_assets(static)
+    index_v1 = (static / "index.html").read_text()
+
+    # Capture all expected hashes
+    app_hash = _sha256_short(app_js.encode())
+    styles_hash = _sha256_short(styles_css.encode())
+    um_js_hash = _sha256_short(user_mgmt_js.encode())
+    um_css_hash_v1 = _sha256_short(user_mgmt_css_v1.encode())
+    # collapsible assets use default content from _make_static_dir
+    dash_collapsible_js = "console.log('collapsible');\n"
+    collapsible_css = "body{color:blue}\n"
+    dash_hash = _sha256_short(dash_collapsible_js.encode())
+    coll_hash = _sha256_short(collapsible_css.encode())
+
+    # Verify v1 URLs
+    assert f"/app.js?v={app_hash}" in index_v1
+    assert f"/styles.css?v={styles_hash}" in index_v1
+    assert f"/user-management.js?v={um_js_hash}" in index_v1
+    assert f"/user-management.css?v={um_css_hash_v1}" in index_v1
+    assert f"/dashboard-collapsible.js?v={dash_hash}" in index_v1
+    assert f"/collapsible.css?v={coll_hash}" in index_v1
+
+    # Modify ONLY user-management.css
+    (static / "user-management.css").write_text(user_mgmt_css_v2, encoding="utf-8")
+
+    vsa.version_static_assets(static)
+    index_v2 = (static / "index.html").read_text()
+
+    um_css_hash_v2 = _sha256_short(user_mgmt_css_v2.encode())
+    assert um_css_hash_v1 != um_css_hash_v2
+
+    # user-management.css URL changed
+    assert f"/user-management.css?v={um_css_hash_v1}" not in index_v2
+    assert f"/user-management.css?v={um_css_hash_v2}" in index_v2
+
+    # All other asset URLs unchanged
+    assert f"/app.js?v={app_hash}" in index_v2
+    assert f"/styles.css?v={styles_hash}" in index_v2
+    assert f"/user-management.js?v={um_js_hash}" in index_v2
+    assert f"/dashboard-collapsible.js?v={dash_hash}" in index_v2
+    assert f"/collapsible.css?v={coll_hash}" in index_v2
+
+
+# ---------------------------------------------------------------------------
+# 24. user-management.css: asset bytes not modified
+# ---------------------------------------------------------------------------
+
+def test_user_management_css_asset_bytes_not_modified(tmp_path):
+    """The helper does not modify user-management.css file content."""
+    user_mgmt_css = "body{color:green}\n"
+    static = _make_static_dir(tmp_path, user_mgmt_css=user_mgmt_css)
+
+    vsa.version_static_assets(static)
+
+    assert (static / "user-management.css").read_text() == user_mgmt_css
+
+
+# ---------------------------------------------------------------------------
+# 25. HTML without user-management.css reference doesn't gain one
+# ---------------------------------------------------------------------------
+
+def test_html_without_user_management_css_reference_untouched(tmp_path):
+    """If an HTML file doesn't reference user-management.css, the helper doesn't add a reference."""
+    user_mgmt_css = "body{color:green}\n"
+    index_html = (
+        '<html><head>\n'
+        '  <link rel="stylesheet" href="/styles.css">\n'
+        '</head><body>\n'
+        '  <script src="/app.js" defer></script>\n'
+        '  <script src="/user-management.js" defer></script>\n'
+        '</body></html>\n'
+    )
+    static = _make_static_dir(tmp_path, user_mgmt_css=user_mgmt_css, index_html=index_html)
+
+    vsa.version_static_assets(static)
+
+    index = (static / "index.html").read_text()
+    assert "user-management.css" not in index
