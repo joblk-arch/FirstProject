@@ -51,3 +51,20 @@ def test_separate_non_actionable_html_wiring():
     assert "renderIsolatedWorkflows(data.isolated_workflows)" in js
     assert "catch(error) { window.renderIsolatedWorkflows?.(null);" in js
     assert "COPY isolated_status_projection.py /app/isolated_status_projection.py" in (root/"Dockerfile").read_text()
+
+
+def test_both_registered_builds_no_cross_membership_or_duplicates():
+    raw = payload()
+    key = "excel-registration-20261024"
+    workflow, label, expected = projection._REGISTERED[key]
+    new = {"source": key, "workflow_id": workflow, "label": "untrusted", "read_only": True,
+           "availability": "available", "jobs": [dict(id=j, stage=s, role=r, status="queued", started_at=None, finished_at=None) for j, (s, r) in expected.items()]}
+    raw["sources"].extend([new, new])
+    result = projection.project_isolated_workflows(raw)
+    assert len(result["sources"]) == 2
+    assert result["sources"][1]["label"] == label
+    assert all(s["availability"] == "available" for s in result["sources"])
+    new["jobs"][0]["id"] = next(iter(projection._EXPECTED))
+    result = projection.project_isolated_workflows(raw)
+    assert result["sources"][0]["availability"] == "available"
+    assert result["sources"][1]["availability"] == "unavailable"
