@@ -128,6 +128,10 @@
         <summary class="panel-head"><div><p class="eyebrow">WORKFLOWS</p><h2>Recent workflows</h2></div><span class="hint">Newest first</span><span class="hint" id="recent-workflows-hint" aria-live="polite">Unavailable</span></summary>
         <div class="table-wrap"><table><thead><tr><th>Project</th><th>Objective</th><th>Status</th><th>Repair</th><th>Origin</th><th>Models</th><th>Stages</th><th>Tokens (in/out/total)</th><th>Created</th></tr></thead><tbody id="workflows"></tbody></table></div>
       </details>
+      <section class="panel span-2" id="isolated-workflows-panel" aria-labelledby="isolated-workflows-title">
+        <div class="panel-head"><div><p class="eyebrow">ISOLATED BUILDS</p><h2 id="isolated-workflows-title">Supervised isolated workflows</h2></div><span class="hint">Read-only · Separate queue</span></div>
+        <div id="isolated-workflow-status" aria-live="polite">Isolated workflow data unavailable.</div>
+      </section>
       <details class="panel" id="work-distribution-panel">
         <summary class="panel-head"><div><p class="eyebrow">PROJECTS</p><h2>Work distribution</h2></div><span class="hint" id="work-distribution-hint" aria-live="polite">Unavailable</span></summary>
         <div id="projects" class="stack"></div>
@@ -213,7 +217,8 @@
     </div>
   </div>
   <script src="/dashboard-collapsible.js" defer></script>
-  <script src="/app.js?v=reliability-counts-3" defer></script>
+  <script src="/isolated-workflows.js?v=read-only-1" defer></script>
+  <script src="/app.js?v=isolated-read-only-1" defer></script>
   <script src="/user-management.js" defer></script>
 </body>
 </html>

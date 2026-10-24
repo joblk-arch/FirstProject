@@ -1147,6 +1147,8 @@ def _project_dashboard(raw: dict) -> dict:
     Missing or malformed repair fields yield None / "none" state, never errors.
     """
     result = dict(raw)
+    from isolated_status_projection import project_isolated_workflows
+    result["isolated_workflows"] = project_isolated_workflows(raw.get("isolated_workflows"))
 
     # System-level repair fields (safely validated)
     result["repair_enabled"] = _safe_bool(raw.get("repair_enabled"))

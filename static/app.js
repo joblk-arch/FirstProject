@@ -106,6 +106,7 @@ function renderSummaries(data) {
 }
 
 function render(data) {
+  if (typeof renderIsolatedWorkflows === 'function') renderIsolatedWorkflows(data.isolated_workflows);
   renderSummaries(data);
   renderRecentWorkflowReliability(data.recent_workflow_reliability);
   renderWorkflowBottlenecks(data.workflow_bottlenecks);
@@ -746,7 +747,7 @@ async function loadUpsStatus() {
 
 async function load() {
   try { const response=await fetch('/api/dashboard',{cache:'no-store'}); if(_handle401(response)) throw new Error('Session expired'); if(!response.ok) throw new Error(`Dashboard returned ${response.status}`); render(await response.json()); }
-  catch(error) { renderSummaries(null); renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); renderAgentActivity(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
+  catch(error) { window.renderIsolatedWorkflows?.(null); renderSummaries(null); renderRecentWorkflowReliability(null); renderWorkflowBottlenecks(null); renderCompletionRecovery(null); renderValidationDiagnostics(null); renderAgentActivity(null); if(error.message==='Session expired') return; $('error').textContent=error.message; $('error').hidden=false; $('updated').textContent='Connection issue'; }
   loadUpsStatus();
 }
 
