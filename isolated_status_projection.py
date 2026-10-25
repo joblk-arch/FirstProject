@@ -3,6 +3,9 @@ from datetime import datetime
 
 _EXPECTED = {"a97bf857edcf": ("plan", "planner"), "33c5ba12b83e": ("implement", "implementer"), "37ed0da9cdee": ("test", "tester"), "5ed8a02d1264": ("review", "reviewer")}
 _REGISTERED = {
+    "excel-task-20261025": ("officeexceltask20261025", "Excel-only completion build", {
+        "92f1684dc59d": ("plan", "planner"), "22386be3e1a5": ("implement", "implementer"),
+        "f9a7542e0a84": ("test", "tester"), "6e4bcd5632ee": ("review", "reviewer")}),
     "excel-tool-20261024": ("officeexceltool20261024", "Excel tool build", _EXPECTED),
     "excel-registration-20261024": ("officeexcelregistration20261024", "Excel worker integration build", {
         "7c833861c145": ("plan", "planner"), "0f5b48e6968e": ("implement", "implementer"),

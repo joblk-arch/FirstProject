@@ -68,3 +68,16 @@ def test_both_registered_builds_no_cross_membership_or_duplicates():
     result = projection.project_isolated_workflows(raw)
     assert result["sources"][0]["availability"] == "available"
     assert result["sources"][1]["availability"] == "unavailable"
+
+
+def test_current_completion_build_exact_membership():
+    key = "excel-task-20261025"
+    workflow, label, expected = projection._REGISTERED[key]
+    source = dict(source=key, workflow_id=workflow, label="ignored", read_only=True, availability="available",
+        jobs=[dict(id=j, stage=s, role=r, status="running" if s == "plan" else "queued", started_at=None, finished_at=None) for j, (s, r) in expected.items()])
+    result = projection.project_isolated_workflows(dict(read_only=True, sources=[source]))
+    assert result["sources"][0]["label"] == label
+    assert result["sources"][0]["availability"] == "available"
+    assert [j["id"] for j in result["sources"][0]["jobs"]] == list(expected)
+    source["jobs"][0]["id"] = next(iter(projection._EXPECTED))
+    assert projection.project_isolated_workflows(dict(read_only=True, sources=[source]))["sources"][0]["availability"] == "unavailable"
