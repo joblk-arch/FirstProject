@@ -117,3 +117,12 @@ def test_word_registration_source_exact():
     raw = dict(read_only=True, sources=[dict(source='word-registration-20261026', workflow_id=workflow, read_only=True, availability='available', jobs=[dict(id=j, stage=s, role=r, status='queued', started_at=None, finished_at=None) for j,(s,r) in expected.items()])])
     result = projection.project_isolated_workflows(raw)['sources'][0]
     assert result['availability'] == 'available' and result['label'] == label
+
+
+def test_word_task_source_exact():
+    workflow, label, expected = projection._REGISTERED['word-task-20261026']
+    assert workflow == 'wordtask20261026'
+    assert list(expected) == ['c3c9f6650366','f641e1e00ef4','489cd923394d','700008c1c456']
+    raw = dict(read_only=True, sources=[dict(source='word-task-20261026', workflow_id=workflow, read_only=True, availability='available', jobs=[dict(id=j, stage=s, role=r, status='queued', started_at=None, finished_at=None) for j,(s,r) in expected.items()])])
+    result = projection.project_isolated_workflows(raw)['sources'][0]
+    assert result['availability'] == 'available' and result['label'] == label
