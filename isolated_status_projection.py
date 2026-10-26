@@ -3,6 +3,12 @@ from datetime import datetime
 
 _EXPECTED = {"a97bf857edcf": ("plan", "planner"), "33c5ba12b83e": ("implement", "implementer"), "37ed0da9cdee": ("test", "tester"), "5ed8a02d1264": ("review", "reviewer")}
 _REGISTERED = {
+    "word-create-20261025": ("wordcreate20261025", "Word creation compatibility build", {
+        "26803bb81f52": ("plan", "planner"), "865e6e12832b": ("implement", "implementer"),
+        "ae721b1382f5": ("test", "tester"), "8e916cbd3378": ("review", "reviewer")}),
+    "word-draft-20261025": ("officeword20261025", "Word document draft build", {
+        "e090b5d7e352": ("plan", "planner"), "8615ae700d55": ("implement", "implementer"),
+        "2a1ad3e52bc9": ("test", "tester"), "bd9f4c7580ad": ("review", "reviewer")}),
     "excel-task-20261025": ("officeexceltask20261025", "Excel-only completion build", {
         "92f1684dc59d": ("plan", "planner"), "22386be3e1a5": ("implement", "implementer"),
         "f9a7542e0a84": ("test", "tester"), "6e4bcd5632ee": ("review", "reviewer")}),

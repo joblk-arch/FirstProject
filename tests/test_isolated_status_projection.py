@@ -4,6 +4,26 @@ import subprocess
 import isolated_status_projection as projection
 import app
 
+def test_word_creation_exact_projection():
+    key="word-create-20261025"
+    workflow,label,expected=projection._REGISTERED[key]
+    assert list(expected)==["26803bb81f52","865e6e12832b","ae721b1382f5","8e916cbd3378"]
+    source=dict(source=key,workflow_id=workflow,read_only=True,availability="available",
+        jobs=[dict(id=j,stage=s,role=r,status="running" if s=="plan" else "queued",started_at=None,finished_at=None) for j,(s,r) in expected.items()])
+    result=projection.project_isolated_workflows(dict(read_only=True,sources=[source]))
+    assert result["sources"][0]["availability"]=="available" and result["sources"][0]["label"]==label
+
+def test_word_draft_exact_projection():
+    key = "word-draft-20261025"
+    workflow, label, expected = projection._REGISTERED[key]
+    assert list(expected) == ["e090b5d7e352", "8615ae700d55", "2a1ad3e52bc9", "bd9f4c7580ad"]
+    source = dict(source=key, workflow_id=workflow, read_only=True, availability="available",
+        jobs=[dict(id=j, stage=s, role=r, status="queued", started_at=None, finished_at=None) for j, (s,r) in expected.items()])
+    result = projection.project_isolated_workflows(dict(read_only=True, sources=[source]))
+    assert result["sources"][0]["label"] == label and result["sources"][0]["availability"] == "available"
+    source["jobs"][0]["id"] = next(iter(projection._EXPECTED))
+    assert projection.project_isolated_workflows(dict(read_only=True,sources=[source]))["sources"][0]["availability"] == "unavailable"
+
 
 def payload():
     return {"read_only": True, "sources": [{"source": "excel-tool-20261024", "label": "Ignore untrusted title", "workflow_id": "officeexceltool20261024", "read_only": True, "availability": "available", "jobs": [{"id": key, "stage": value[0], "role": value[1], "status": "running" if value[0] == "plan" else "queued", "started_at": None, "finished_at": None, "path": "/secret", "actions": ["retry"]} for key, value in projection._EXPECTED.items()], "secret": "hidden"}]}
