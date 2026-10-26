@@ -110,3 +110,10 @@ def test_current_completion_build_exact_membership():
     assert [j["id"] for j in result["sources"][0]["jobs"]] == list(expected)
     source["jobs"][0]["id"] = next(iter(projection._EXPECTED))
     assert projection.project_isolated_workflows(dict(read_only=True, sources=[source]))["sources"][0]["availability"] == "unavailable"
+def test_word_registration_source_exact():
+    workflow, label, expected = projection._REGISTERED['word-registration-20261026']
+    assert workflow == 'wordregistration20261026'
+    assert list(expected) == ['4f2a1a477586','5897539b121d','a358307ccc57','151aecfaca8c']
+    raw = dict(read_only=True, sources=[dict(source='word-registration-20261026', workflow_id=workflow, read_only=True, availability='available', jobs=[dict(id=j, stage=s, role=r, status='queued', started_at=None, finished_at=None) for j,(s,r) in expected.items()])])
+    result = projection.project_isolated_workflows(raw)['sources'][0]
+    assert result['availability'] == 'available' and result['label'] == label
