@@ -3,6 +3,9 @@ from datetime import datetime
 
 _EXPECTED = {"a97bf857edcf": ("plan", "planner"), "33c5ba12b83e": ("implement", "implementer"), "37ed0da9cdee": ("test", "tester"), "5ed8a02d1264": ("review", "reviewer")}
 _REGISTERED = {
+    "powerpoint-draft-20261026": ("powerpointdraft20261026", "PowerPoint draft build", {
+        "4c6e9851a91e": ("plan", "planner"), "eb3398820854": ("implement", "implementer"),
+        "6c5696e2c6d7": ("test", "tester"), "69163e94def6": ("review", "reviewer")}),
     "word-task-20261026": ("wordtask20261026", "Word-only completion build", {
         "c3c9f6650366": ("plan", "planner"), "f641e1e00ef4": ("implement", "implementer"),
         "489cd923394d": ("test", "tester"), "700008c1c456": ("review", "reviewer")}),
@@ -39,7 +42,7 @@ def _time(value):
 
 def project_isolated_workflows(raw):
     result = {"read_only": True, "sources": []}
-    if type(raw) is not dict or raw.get("read_only") is not True or type(raw.get("sources")) is not list or len(raw["sources"]) > 8:
+    if type(raw) is not dict or raw.get("read_only") is not True or type(raw.get("sources")) is not list or len(raw["sources"]) > len(_REGISTERED):
         return result
     seen = set()
     for source in raw["sources"]:

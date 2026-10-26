@@ -126,3 +126,12 @@ def test_word_task_source_exact():
     raw = dict(read_only=True, sources=[dict(source='word-task-20261026', workflow_id=workflow, read_only=True, availability='available', jobs=[dict(id=j, stage=s, role=r, status='queued', started_at=None, finished_at=None) for j,(s,r) in expected.items()])])
     result = projection.project_isolated_workflows(raw)['sources'][0]
     assert result['availability'] == 'available' and result['label'] == label
+
+
+def test_powerpoint_source_and_registered_bound():
+    workflow, label, expected = projection._REGISTERED['powerpoint-draft-20261026']
+    assert workflow == 'powerpointdraft20261026'
+    assert list(expected) == ['4c6e9851a91e','eb3398820854','6c5696e2c6d7','69163e94def6']
+    sources = [dict(source=k,workflow_id=w,read_only=True,availability='available',jobs=[dict(id=j,stage=s,role=r,status='queued',started_at=None,finished_at=None) for j,(s,r) in e.items()]) for k,(w,l,e) in projection._REGISTERED.items()]
+    assert len(projection.project_isolated_workflows(dict(read_only=True,sources=sources))['sources']) == len(projection._REGISTERED)
+    assert projection.project_isolated_workflows(dict(read_only=True,sources=sources+[sources[0]]))['sources'] == []
