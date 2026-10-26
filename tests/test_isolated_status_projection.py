@@ -4,6 +4,15 @@ import subprocess
 import isolated_status_projection as projection
 import app
 
+def test_word_tool_exact_projection():
+    key="word-tool-20261026"
+    workflow,label,expected=projection._REGISTERED[key]
+    assert list(expected)==["c746c620cdd4","f1d2c82a5290","35477fa8fea4","59f38ab39240"]
+    source=dict(source=key,workflow_id=workflow,read_only=True,availability="available",
+        jobs=[dict(id=j,stage=s,role=r,status="queued",started_at=None,finished_at=None) for j,(s,r) in expected.items()])
+    result=projection.project_isolated_workflows(dict(read_only=True,sources=[source]))
+    assert result["sources"][0]["availability"]=="available" and result["sources"][0]["label"]==label
+
 def test_word_creation_exact_projection():
     key="word-create-20261025"
     workflow,label,expected=projection._REGISTERED[key]

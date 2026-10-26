@@ -3,6 +3,9 @@ from datetime import datetime
 
 _EXPECTED = {"a97bf857edcf": ("plan", "planner"), "33c5ba12b83e": ("implement", "implementer"), "37ed0da9cdee": ("test", "tester"), "5ed8a02d1264": ("review", "reviewer")}
 _REGISTERED = {
+    "word-tool-20261026": ("wordtool20261026", "Word tool build", {
+        "c746c620cdd4": ("plan", "planner"), "f1d2c82a5290": ("implement", "implementer"),
+        "35477fa8fea4": ("test", "tester"), "59f38ab39240": ("review", "reviewer")}),
     "word-create-20261025": ("wordcreate20261025", "Word creation compatibility build", {
         "26803bb81f52": ("plan", "planner"), "865e6e12832b": ("implement", "implementer"),
         "ae721b1382f5": ("test", "tester"), "8e916cbd3378": ("review", "reviewer")}),
