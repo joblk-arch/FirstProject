@@ -4,6 +4,18 @@ import subprocess
 import isolated_status_projection as projection
 import app
 
+def test_comparison_exact_five_stage_projection():
+    for key in ('powerpoint-task-27b-20261027','powerpoint-task-flash-20261027'):
+        workflow,label,expected=projection._REGISTERED[key]
+        source=dict(source=key,workflow_id=workflow,read_only=True,availability='available',
+            jobs=[dict(id=j,stage=s,role=r,status='queued',started_at=None,finished_at=None) for j,(s,r) in expected.items()])
+        assert len(expected)==5
+        assert projection.project_isolated_workflows(dict(read_only=True,sources=[source]))['sources'][0]['availability']=='available'
+        source['jobs'].pop()
+        assert projection.project_isolated_workflows(dict(read_only=True,sources=[source]))['sources'][0]['availability']=='unavailable'
+        source['jobs'].append(source['jobs'][0])
+        assert projection.project_isolated_workflows(dict(read_only=True,sources=[source]))['sources'][0]['availability']=='unavailable'
+
 def test_word_tool_exact_projection():
     key="word-tool-20261026"
     workflow,label,expected=projection._REGISTERED[key]

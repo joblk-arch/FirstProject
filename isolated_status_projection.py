@@ -3,6 +3,12 @@ from datetime import datetime
 
 _EXPECTED = {"a97bf857edcf": ("plan", "planner"), "33c5ba12b83e": ("implement", "implementer"), "37ed0da9cdee": ("test", "tester"), "5ed8a02d1264": ("review", "reviewer")}
 _REGISTERED = {
+    "powerpoint-task-27b-20261027": ("powerpointtask27b20261027", "PowerPoint completion — Qwen 27B comparison", {
+        "b9bab636f66c": ("reason", "reasoner"), "e8adb09d885f": ("plan", "planner"),
+        "c2cd6db76c84": ("implement", "implementer"), "0bbf490a375a": ("test", "tester"), "25d8502002fe": ("review", "reviewer")}),
+    "powerpoint-task-flash-20261027": ("powerpointtaskflash20261027", "PowerPoint completion — Flash comparison", {
+        "e36d3c7ecdcc": ("reason", "reasoner"), "1aeae2cba370": ("plan", "planner"),
+        "ff2022c4709a": ("implement", "implementer"), "b2fd05156ea0": ("test", "tester"), "d0869d1ca796": ("review", "reviewer")}),
     "powerpoint-registration-20261027": ("powerpointregistration20261027", "PowerPoint worker integration build", {
         "b587a7142995": ("plan", "planner"), "24bf587f6384": ("implement", "implementer"),
         "02ca151cb660": ("test", "tester"), "d0466253da77": ("review", "reviewer")}),
@@ -65,7 +71,7 @@ def project_isolated_workflows(raw):
         clean = {"source": key, "label": label, "workflow_id": workflow, "read_only": True, "availability": "unavailable", "jobs": []}
         try:
             jobs = source.get("jobs")
-            if source.get("availability") != "available" or type(jobs) is not list or len(jobs) != 4:
+            if source.get("availability") != "available" or type(jobs) is not list or len(jobs) != len(expected):
                 raise ValueError
             rows, ids = [], []
             for job in jobs:
@@ -73,7 +79,7 @@ def project_isolated_workflows(raw):
                     raise ValueError
                 ids.append(job["id"])
                 rows.append({"id": job["id"], "stage": job["stage"], "role": job["role"], "status": job["status"], "started_at": _time(job.get("started_at")), "finished_at": _time(job.get("finished_at"))})
-            if len(set(ids)) != 4:
+            if len(set(ids)) != len(expected):
                 raise ValueError
             clean.update(availability="available", jobs=rows)
         except (ValueError, TypeError):
