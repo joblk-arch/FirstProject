@@ -3,6 +3,9 @@ from datetime import datetime
 
 _EXPECTED = {"a97bf857edcf": ("plan", "planner"), "33c5ba12b83e": ("implement", "implementer"), "37ed0da9cdee": ("test", "tester"), "5ed8a02d1264": ("review", "reviewer")}
 _REGISTERED = {
+    "powerpoint-tool-20261027": ("powerpointtool20261027", "PowerPoint tool build", {
+        "e61b2e0fa074": ("plan", "planner"), "19315614734c": ("implement", "implementer"),
+        "3526d1f90839": ("test", "tester"), "67791ba85554": ("review", "reviewer")}),
     "powerpoint-create-20261026": ("powerpointcreate20261026", "PowerPoint creation compatibility build", {
         "7e881d7908aa": ("plan", "planner"), "6a798090f5bd": ("implement", "implementer"),
         "5847207dccff": ("test", "tester"), "7dafab8e3b95": ("review", "reviewer")}),
