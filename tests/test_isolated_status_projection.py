@@ -128,6 +128,12 @@ def test_word_task_source_exact():
     assert result['availability'] == 'available' and result['label'] == label
 
 
+def test_powerpoint_creation_source_exact():
+    workflow, label, expected = projection._REGISTERED['powerpoint-create-20261026']
+    assert workflow == 'powerpointcreate20261026'
+    assert list(expected) == ['7e881d7908aa','6a798090f5bd','5847207dccff','7dafab8e3b95']
+
+
 def test_powerpoint_source_and_registered_bound():
     workflow, label, expected = projection._REGISTERED['powerpoint-draft-20261026']
     assert workflow == 'powerpointdraft20261026'
